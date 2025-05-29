@@ -27,16 +27,16 @@ EXPOSE 22 8888
 ENV CONDA_DIR /opt/conda
 ENV PATH $CONDA_DIR/bin:$PATH
 RUN wget --quiet https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh -O ~/miniconda.sh && \
-    bash ~/miniconda.sh -b -p $CONDA_DIR && \
+    bash ~/miniconda.sh -b -u -p $CONDA_DIR && \
     rm ~/miniconda.sh && \
     conda clean -afy
 
 # Create conda environment, install Jupyter Notebook and PyTorch
 RUN conda create -y -n torch-env python=3.12 && \
     conda run -n torch-env pip install --upgrade pip && \
-    conda run -n torch-env pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128 \
+    conda run -n torch-env pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128 && \
     conda run -n torch-env pip install notebook && \
-    conda run -n torch-env pip install requirements.txt
+    conda run -n torch-env pip install -r requirements.txt
 
 # Set the default conda environment to activate
 CMD bash -c "\
