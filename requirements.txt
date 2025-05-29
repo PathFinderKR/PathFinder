@@ -1,0 +1,6 @@
+wandb
+tqdm
+transformers
+datasets
+numpy
+requests
