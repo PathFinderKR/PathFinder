@@ -1,4 +1,5 @@
 wandb
+python-dotenv
 tqdm
 transformers
 datasets

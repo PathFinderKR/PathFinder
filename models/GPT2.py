@@ -1,30 +1,9 @@
 import math
-from dataclasses import dataclass
-from typing import Type
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
-
-@dataclass
-class ModelConfig:
-    vocab_size: int = 50304  # 50000 BPE merges + 256 bytes + 1 <|endoftext|> = 50257 -> 50304 for GPU efficiency
-    max_seq_len: int = 1024
-    d_embed: int = 768
-    n_layers: int = 12
-    norm_eps: float = 1e-5
-    dropout: float = 0.1
-
-    # Attention
-    n_heads: int = 12
-    d_head: int = d_embed // n_heads
-    attn_bias: bool = True
-
-    # FeedForward
-    d_ff: int = d_embed * 4
-    mlp_bias: bool = True
-    activation: Type[nn.Module] = nn.GELU
-
+#from transformer_engine.pytorch import fp8_autocast
+from src.config import ModelConfig
 
 class MultiHeadAttention(nn.Module):
     def __init__(self, config: ModelConfig):
@@ -88,13 +67,133 @@ class FeedForward(nn.Module):
         return x
 
 
+class Expert(nn.Module):
+    def __init__(self, config: ModelConfig):
+        super().__init__()
+        self.fc1 = nn.Linear(config.d_embed, config.d_ff, bias=config.mlp_bias)
+        self.activation = config.activation()
+        self.fc2 = nn.Linear(config.d_ff, config.d_embed, bias=config.mlp_bias)
+        self.dropout = nn.Dropout(config.dropout)
+
+    def forward(self, x):
+        x = self.fc1(x)  # [batch_size, seq_len, d_ff]
+        x = self.activation(x)
+        x = self.fc2(x)  # [batch_size, seq_len, d_embed]
+        x = self.dropout(x)
+        return x
+
+
+class Router(nn.Module):
+    def __init__(self, config: ModelConfig):
+        super().__init__()
+        self.top_k = config.n_activated_experts
+        self.gate = nn.Linear(config.d_embed, config.n_experts)
+
+    def forward(self, x):
+        logits = self.gate(x)  # [batch_size, seq_len, n_experts]
+        scores = F.softmax(logits, dim=-1)
+        scores, indices = torch.topk(scores, self.top_k, dim=-1)  # [batch_size, seq_len, top_k]
+        return scores, indices
+
+
+class MoE(nn.Module):
+    def __init__(self, config: ModelConfig):
+        super().__init__()
+        self.top_k = config.n_activated_experts
+        if config.n_experts is None or config.n_activated_experts is None:
+            raise ValueError("n_experts and n_activated_experts must be specified for MoE")
+        if config.n_experts < config.n_activated_experts:
+            raise ValueError("n_experts must be greater than or equal to n_activated_experts")
+        self.router = Router(config)
+        self.experts = nn.ModuleList([Expert(config) for _ in range(config.n_experts)])
+        if config.n_shared_experts is not None:
+            self.shared_experts = nn.ModuleList([Expert(config) for _ in range(config.n_shared_experts)])
+        else:
+            self.shared_experts = None
+
+    def forward(self, x):
+        batch_size, seq_len, d_embed = x.size()
+        scores, indices = self.router(x)
+
+        x_flat = x.view(-1, d_embed)  # [batch * seq, d_embed]
+        scores_flat = scores.view(-1, self.top_k)  # [batch * seq, top_k]
+        indices_flat = indices.view(-1, self.top_k)  # [batch * seq, top_k]
+
+        y_flat = torch.zeros_like(x_flat)
+
+        for expert_idx, expert in enumerate(self.experts):
+            mask = (indices_flat == expert_idx)
+            selected_pos = mask.any(dim=-1)  # [batch * seq]
+
+            if selected_pos.any():
+                expert_input = x_flat[selected_pos]  # [top_k, d_embed]
+                expert_output = expert(expert_input)
+
+                selected_mask_idx, selected_topk_idx = torch.where(mask)
+                gating_scores = scores_flat[selected_mask_idx, selected_topk_idx].unsqueeze(1)  # [top_k, 1]
+
+                weighted_output = expert_output * gating_scores  # [top_k, d_embed]
+                y_flat[selected_pos] += weighted_output  # [batch * seq, d_embed]
+
+        if self.shared_experts is not None:
+            shared_output = sum([expert(x_flat) for expert in self.shared_experts]) / len(self.shared_experts)
+            y_flat += shared_output  # [batch * seq, d_embed]
+
+        y = y_flat.view(batch_size, seq_len, d_embed)
+        return y
+
+
+class RouterFreeMoE(nn.Module):
+    def __init__(self, config: ModelConfig):
+        super().__init__()
+        self.experts = nn.ModuleList([Expert(config) for _ in range(config.n_experts)])
+
+    def forward(self, x):
+        batch_size, seq_len, d_embed = x.size()
+        x_flat = x.view(-1, d_embed)  # [batch * seq, d_embed]
+
+        # Step 1: Expert selection
+        deltas = []
+        with torch.no_grad():
+            # if Device compute capabilities is 8.9 or higher, use fp8_autocast
+            if torch.cuda.get_device_capability()[0] >= 8 and torch.cuda.get_device_capability()[1] >= 9:
+                ctx = fp8_autocast(enabled=True)
+                print("FP8 execution enabled")
+            else:
+                ctx = torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+            with ctx:
+                for expert in self.experts:
+                    expert_output = expert(x_flat)  # [batch * seq, d_embed]
+                    delta = (expert_output - x_flat).norm(dim=-1)  # [batch * seq]
+                    deltas.append(delta)
+            deltas = torch.stack(deltas, dim=0)  # [n_experts, batch * seq]
+            best_expert_idx = deltas.argmax(dim=0)  # [batch * seq]
+
+        # Step 2: Apply the best expert
+        y_flat = torch.zeros_like(x_flat)
+        for expert_idx, expert in enumerate(self.experts):
+            mask = (best_expert_idx == expert_idx)  # [batch * seq]
+            if mask.any():
+                selected_input = x_flat[mask]  # [num_selected, d_embed]
+                selected_output = expert(selected_input)  # [num_selected, d_embed]
+                y_flat[mask] = selected_output  # [batch * seq, d_embed]
+        y = y_flat.view(batch_size, seq_len, d_embed)
+        return y
+
+
 class Block(nn.Module):
     def __init__(self, config: ModelConfig):
         super().__init__()
         self.norm1 = nn.LayerNorm(config.d_embed, eps=config.norm_eps)
         self.attn = MultiHeadAttention(config)
         self.norm2 = nn.LayerNorm(config.d_embed, eps=config.norm_eps)
-        self.mlp = FeedForward(config)
+        if config.n_experts is not None:
+            if config.router_free:
+                self.mlp = RouterFreeMoE(config)
+            else:
+                self.mlp = MoE(config)
+        else:
+            self.mlp = FeedForward(config)
 
     def forward(self, x):
         x = x + self.attn(self.norm1(x))
@@ -102,18 +201,7 @@ class Block(nn.Module):
         return x
 
 
-def _init_weights(module):
-    if isinstance(module, nn.Linear):
-        torch.nn.init.kaiming_uniform_(module.weight, a=math.sqrt(5))
-        if module.bias is not None:
-            fan_in, _ = torch.nn.init._calculate_fan_in_and_fan_out(module.weight)
-            bound = 1 / math.sqrt(fan_in)
-            torch.nn.init.uniform_(module.bias, -bound, bound)
-    elif isinstance(module, nn.Embedding):
-        torch.nn.init.kaiming_uniform_(module.weight, a=math.sqrt(5))
-
-
-class GPT2(nn.Module):
+class GPT(nn.Module):
     def __init__(self, config: ModelConfig):
         super().__init__()
         self.config = config
@@ -125,11 +213,50 @@ class GPT2(nn.Module):
         self.lm_head = nn.Linear(config.d_embed, config.vocab_size, bias=False)
         self.lm_head.weight = self.embedding.weight
 
-        self.apply(_init_weights)
+        self.apply(self._init_weights)
+
+    def _init_weights(self, module):
+        if isinstance(module, nn.Linear):
+            torch.nn.init.kaiming_uniform_(module.weight, a=math.sqrt(5))
+            if module.bias is not None:
+                fan_in, _ = torch.nn.init._calculate_fan_in_and_fan_out(module.weight)
+                bound = 1 / math.sqrt(fan_in)
+                torch.nn.init.uniform_(module.bias, -bound, bound)
+        elif isinstance(module, nn.Embedding):
+            torch.nn.init.kaiming_uniform_(module.weight, a=math.sqrt(5))
 
     def num_params(self):
-        unique = {p.data_ptr(): p for p in self.parameters()}
-        return sum(p.numel() for p in unique.values())
+        return sum(p.numel() for p in self.parameters() if p.requires_grad) - self.lm_head.weight.numel()
+
+    def num_active_params(self):
+        n_params = 0
+        # Embedding and positional encoding
+        n_params += self.embedding.weight.numel()
+        n_params += self.positional_encoding.weight.numel()
+
+        # Transformer blocks
+        for block in self.blocks:
+            # Attention
+            n_params += block.attn.qkv_proj.weight.numel()
+            n_params += block.attn.out_proj.weight.numel()
+
+            # MLP
+            if self.config.n_experts is not None:
+                for i in range(self.config.n_activated_experts):
+                    n_params += block.mlp.experts[i].fc1.weight.numel()
+                    n_params += block.mlp.experts[i].fc2.weight.numel()
+            else:
+                n_params += block.mlp.fc1.weight.numel()
+                n_params += block.mlp.fc2.weight.numel()
+
+            # LayerNorm
+            n_params += block.norm1.weight.numel()
+            n_params += block.norm2.weight.numel()
+
+        # Final normalization
+        n_params += self.norm.weight.numel()
+
+        return n_params
 
     def forward(self, idx, targets=None):
         device = idx.device
@@ -180,8 +307,10 @@ class GPT2(nn.Module):
 
 def main():
     config = ModelConfig()
-    model = GPT2(config)
+    model = GPT(config)
+    print(model)
     print(f"Number of parameters: {model.num_params() / 1e6:.2f}M")
+    print(f"Number of active parameters: {model.num_active_params() / 1e6:.2f}M")
 
 
 if __name__ == "__main__":
