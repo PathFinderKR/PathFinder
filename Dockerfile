@@ -31,12 +31,13 @@ RUN wget --quiet https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86
     rm ~/miniconda.sh && \
     conda clean -afy
 
+WORKDIR /workspace
+
 # Create conda environment, install Jupyter Notebook and PyTorch
 RUN conda create -y -n torch-env python=3.12 && \
     conda run -n torch-env pip install --upgrade pip && \
     conda run -n torch-env pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu128 && \
-    conda run -n torch-env pip install notebook && \
-    conda run -n torch-env pip install -r requirements.txt
+    conda run -n torch-env pip install notebook
 
 # Set the default conda environment to activate
 CMD bash -c "\
