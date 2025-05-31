@@ -237,34 +237,7 @@ class GPT(nn.Module, PyTorchModelHubMixin):
         return sum(p.numel() for p in self.parameters() if p.requires_grad) - self.lm_head.weight.numel()
 
     def num_active_params(self):
-        n_params = 0
-        # Embedding and positional encoding
-        n_params += self.embedding.weight.numel()
-        n_params += self.positional_encoding.weight.numel()
-
-        # Transformer blocks
-        for block in self.blocks:
-            # Attention
-            n_params += block.attn.qkv_proj.weight.numel()
-            n_params += block.attn.out_proj.weight.numel()
-
-            # MLP
-            if self.config.n_experts is not None:
-                for i in range(self.config.n_activated_experts):
-                    n_params += block.mlp.experts[i].fc1.weight.numel()
-                    n_params += block.mlp.experts[i].fc2.weight.numel()
-            else:
-                n_params += block.mlp.fc1.weight.numel()
-                n_params += block.mlp.fc2.weight.numel()
-
-            # LayerNorm
-            n_params += block.norm1.weight.numel()
-            n_params += block.norm2.weight.numel()
-
-        # Final normalization
-        n_params += self.norm.weight.numel()
-
-        return n_params
+        pass
 
     def forward(self, idx, targets=None):
         device = idx.device
@@ -314,11 +287,10 @@ class GPT(nn.Module, PyTorchModelHubMixin):
 
 
 def main():
-    config = ModelConfig()
-    model = GPT(config)
+    model_config = ModelConfig()
+    model = GPT(model_config)
     print(model)
     print(f"Number of parameters: {model.num_params() / 1e6:.2f}M")
-    print(f"Number of active parameters: {model.num_active_params() / 1e6:.2f}M")
 
 
 if __name__ == "__main__":

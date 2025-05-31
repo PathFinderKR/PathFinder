@@ -79,7 +79,7 @@ class ModelConfig:
 
 @dataclass
 class GenerationConfig:
-    checkpoint_path: str = "../checkpoints/GPT2/2025-05-22_23-04-09.pt"
+    checkpoint_path: str = "../checkpoints/nanoGPT/2025-05-31_09-24-38"
     matmul_precision: Literal["highest", "high", "medium"] = "high"
     max_new_tokens: int = 100
     temperature: float = 1.0

@@ -143,7 +143,7 @@ def main():
     train_config = TrainConfig()
 
     ## GPT-2 Configuration
-    gpt2_small_config = ModelConfig()  # 124M
+    gpt2_small_config = ModelConfig()  # 125M
     gpt2_medium_config = ModelConfig(
         d_embed=1024,
         n_layers=24,
@@ -163,24 +163,33 @@ def main():
         n_layers=24,
         n_heads=24,
         d_head=128,
-        d_ff=8192,
+        d_ff=8192
     )  # 1.3B
+    gpt2_moe_config = ModelConfig(
+        n_experts=4,
+        n_activated_experts=1
+    )  # 294M (125M)
+    gpt2_router_free_moe_config = ModelConfig(
+        n_experts=4,
+        n_activated_experts=1,
+        router_free=True
+    )  # 294M (125M)
     nanogpt_config = ModelConfig(
+        d_embed=512,
+        n_layers=8,
+        n_heads=8,
+        d_head=64,
+        d_ff=2048
+    )  # 26M
+    nanogpt_moe_config = ModelConfig(
         d_embed=128,
         n_layers=4,
         n_heads=4,
         d_head=32,
         d_ff=512,
-    )  #
-    gpt2_moe_config = ModelConfig(
-        n_experts=4,
-        n_activated_experts=1
-    )  # 294M (124M)
-    gpt2_router_free_moe_config = ModelConfig(
         n_experts=4,
         n_activated_experts=1,
-        router_free=True
-    )  # 294M (124M)
+    )  # 2.5M (0.9M)
 
     # Device
     ## Distributed Data Parallel (DDP) setup
@@ -287,12 +296,14 @@ def main():
         model = GPT(gpt2_large_config).to(device)
     elif train_config.model_name == "GPT2-xl":
         model = GPT(gpt2_xl_config).to(device)
-    elif train_config.model_name == "nanoGPT":
-        model = GPT(nanogpt_config).to(device)
     elif train_config.model_name == "GPT2-MoE":
         model = GPT(gpt2_moe_config).to(device)
     elif train_config.model_name == "PathFinder":
         model = GPT(gpt2_router_free_moe_config).to(device)
+    elif train_config.model_name == "nanoGPT":
+        model = GPT(nanogpt_config).to(device)
+    elif train_config.model_name == "nanoGPT-MoE":
+        model = GPT(nanogpt_moe_config).to(device)
     else:
         raise ValueError(f"Unknown model name: {train_config.model_name}")
     model = torch.compile(model)
@@ -318,24 +329,29 @@ def main():
     )
     trainer.train()
 
-    if ddp:
-        destroy_process_group()
-
     # Save model
     if master_process:
         # Save model locally
-        output_dir = f"checkpoints/{train_config.model_name}/{train_config.run_name}"
+        output_dir = f"../checkpoints/{train_config.model_name}/{train_config.run_name}"
         os.makedirs(output_dir, exist_ok=True)
-        model.save_pretrained(
-            output_dir,
-            safe_serialization=True
-        )
+        try:
+            model.save_pretrained(
+                output_dir,
+                safe_serialization=True
+            )
+            print("Model saved successfully.")
+        except Exception as e:
+            print(f"Error saving model: {e}")
         # Push to Hugging Face Hub
         model.push_to_hub(
             repo_id=f"PathFinderKR/{train_config.model_name}-{train_config.run_name}",
             private=True,
             use_auth_token=os.environ.get("HUGGINGFACE_TOKEN")
         )
+        print(f"Model pushed to Hugging Face Hub: PathFinderKR/{train_config.model_name}-{train_config.run_name}")
+
+    if ddp:
+        destroy_process_group()
 
 
 if __name__ == "__main__":

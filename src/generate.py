@@ -28,15 +28,9 @@ def main():
     print(f"Tokenizer: {tokenizer}")
 
     # Model
-    model = GPT(model_config).to(device=device)
-    model = model.compile(model)
+    model = GPT(model_config)
     if os.path.exists(generation_config.checkpoint_path):
-        model = model.from_pretrained(
-            generation_config.checkpoint_path,
-            device_map="auto",
-            torch_dtype=torch.float16,
-            low_cpu_mem_usage=True
-        )
+        model = model.from_pretrained(generation_config.checkpoint_path).to(device)
     else:
         raise FileNotFoundError(f"No checkpoint found at {generation_config.checkpoint_path}")
     print(model)
