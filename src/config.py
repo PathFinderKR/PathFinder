@@ -1,26 +1,26 @@
 from dataclasses import dataclass
-from typing import Literal, Optional, Type
+from typing import Literal, Optional
 from datetime import datetime
 import torch
-import torch.nn as nn
 
 
 @dataclass
 class TrainConfig:
     debug: bool = False
     wandb_project: str = "PathFinder"
-    model_name: Literal["GPT2-small", "GPT2-medium", "GPT2-large", "GPT2-xl",
-                        "GPT2-xs", "GPT2-MoE", "PathFinder",
-                        "nanoGPT", "nanoGPT-MoE"] = "GPT2-MoE"
-    run_name = f"{model_name}-{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}"
-    output_dir: str = f"checkpoints/{model_name}"
+    model_name: Literal[
+        "GPT2-small", "GPT2-medium", "GPT2-large", "GPT2-xl",  # GPT-2
+        "GPT2-MoE", "PathFinder",                              # custom models
+        "nanoGPT", "nanoGPT-MoE"                               # nano versions
+    ] = "nanoGPT"
+    run_name = f"{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}"
 
     # Training
     per_device_train_batch_size: int = 16
     per_device_eval_batch_size: int = 32
     gradient_accumulation_steps: int = 512 // per_device_train_batch_size  # 512 = global batch size
     num_train_epochs: int = 1
-    learning_rate: float = 6e-4
+    learning_rate: float = 2e-3 #6e-4
     weight_decay: float = 0.1
     optim: torch.optim.Optimizer = torch.optim.AdamW
     betas: tuple[float, float] = (0.9, 0.95)
@@ -32,6 +32,14 @@ class TrainConfig:
     ## Precision
     mixed_precision: bool = True
     matmul_precision: Literal["highest", "high", "medium"] = "high"
+
+@dataclass
+class DatasetConfig:
+    dataset_id: Literal["HuggingFaceFW/fineweb-edu"] = "HuggingFaceFW/fineweb-edu"
+    remote_name: Optional[str] = "sample-10BT"
+    split: Optional[str] = "train"
+    local_dir: str = f"../datasets/FineWeb-Edu/10B"
+    val_size: float = 0.01
 
 @dataclass
 class TokenizerConfig:
@@ -60,7 +68,7 @@ class ModelConfig:
     # FeedForward
     d_ff: int = 3072
     mlp_bias: bool = True
-    activation: Type[nn.Module] = nn.GELU
+    activation: Literal["relu", "gelu"] = "gelu"
     d_ff_multiplier: Optional[float] = None
     d_ff_multiple_of: int = 256
     ## Mixture of Experts
@@ -70,13 +78,9 @@ class ModelConfig:
     n_shared_experts: Optional[int] = None
 
 @dataclass
-class DatasetConfig:
-    local_dir: str = f"/workspace/PathFinder/datasets/FineWeb-Edu/10B"
-    val_size: float = 0.01
-
-@dataclass
 class GenerationConfig:
-    checkpoint_path: str = "checkpoints/GPT2/GPT2-2025-05-22_23-04-09.pt"
+    checkpoint_path: str = "../checkpoints/GPT2/2025-05-22_23-04-09.pt"
+    matmul_precision: Literal["highest", "high", "medium"] = "high"
     max_new_tokens: int = 100
     temperature: float = 1.0
     top_k: int = 50

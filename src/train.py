@@ -13,8 +13,6 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from transformers import AutoTokenizer, get_cosine_schedule_with_warmup
 from datasets import load_from_disk
 import wandb
-import sys
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from src.utils import set_seed
 from models.GPT2 import GPT
 from src.config import TokenizerConfig, ModelConfig, DatasetConfig, TrainConfig
@@ -45,8 +43,9 @@ class Trainer:
         if self.master_process:
             wandb.init(
                 project=self.train_config.wandb_project,
-                name=self.train_config.run_name,
-                config=self.train_config.__dict__
+                name=f"{self.train_config.model_name}-{self.train_config.run_name}",
+                config=self.train_config.__dict__,
+                dir="../wandb"
             )
             wandb.watch(self.model, log="all")
 
@@ -166,23 +165,22 @@ def main():
         d_head=128,
         d_ff=8192,
     )  # 1.3B
-    gpt2_xs_config = ModelConfig(
-        max_seq_len=128,
-        d_embed=256,
-        n_layers=8,
-        n_heads=8,
+    nanogpt_config = ModelConfig(
+        d_embed=128,
+        n_layers=4,
+        n_heads=4,
         d_head=32,
-        d_ff=1024,
-    )  # 19M
+        d_ff=512,
+    )  #
     gpt2_moe_config = ModelConfig(
         n_experts=4,
         n_activated_experts=1
-    )  # 294M
+    )  # 294M (124M)
     gpt2_router_free_moe_config = ModelConfig(
         n_experts=4,
         n_activated_experts=1,
         router_free=True
-    )  # 294M
+    )  # 294M (124M)
 
     # Device
     ## Distributed Data Parallel (DDP) setup
@@ -202,6 +200,7 @@ def main():
         train_config.gradient_accumulation_steps //= world_size  # Update global batch size for DDP
     else:
         device = torch.device("cuda")
+        print(f"Device: {torch.cuda.get_device_name(device)}")
         master_process = True
         world_size = 1
         rank = 0
@@ -219,18 +218,21 @@ def main():
         wandb.login(key=os.environ.get("WANDB_API_KEY"))
 
     # Tokenizer
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_config.tokenizer_id)
+    tokenizer = AutoTokenizer.from_pretrained(
+        tokenizer_config.tokenizer_id,
+        use_fast=True
+    )
     tokenizer.pad_token = tokenizer.eos_token
+    print(f"Tokenizer: {tokenizer}")
 
     # Dataset
-    if train_config.model_name == "GPT2-xs":
-        fineweb_dataset = load_from_disk("datasets/FineWeb-Edu/10B-128")
-    else:
-        fineweb_dataset = load_from_disk(dataset_config.local_dir)
+    fineweb_dataset = (load_from_disk(dataset_config.local_dir))
     fineweb_dataset.set_format(type="torch", columns=["input_ids"])
     if master_process:
         print(fineweb_dataset)
     fineweb_dataset = fineweb_dataset.train_test_split(test_size=dataset_config.val_size, shuffle=True, seed=train_config.seed)
+    if master_process:
+        print(f"Train size: {len(fineweb_dataset['train'])}, Test size: {len(fineweb_dataset['test'])}")
 
     def collate_fn(batch, pad_token_id=tokenizer.pad_token_id):
         """
@@ -285,8 +287,8 @@ def main():
         model = GPT(gpt2_large_config).to(device)
     elif train_config.model_name == "GPT2-xl":
         model = GPT(gpt2_xl_config).to(device)
-    elif train_config.model_name == "GPT2-xs":
-        model = GPT(gpt2_xs_config).to(device)
+    elif train_config.model_name == "nanoGPT":
+        model = GPT(nanogpt_config).to(device)
     elif train_config.model_name == "GPT2-MoE":
         model = GPT(gpt2_moe_config).to(device)
     elif train_config.model_name == "PathFinder":
@@ -321,9 +323,19 @@ def main():
 
     # Save model
     if master_process:
-        os.makedirs(train_config.output_dir, exist_ok=True)
-        torch.save(model.state_dict(), os.path.join(train_config.output_dir, f"{train_config.run_name}.pt"))
-        print(f"Model saved to {os.path.join(train_config.output_dir, f'{train_config.run_name}.pt')}")
+        # Save model locally
+        output_dir = f"checkpoints/{train_config.model_name}/{train_config.run_name}"
+        os.makedirs(output_dir, exist_ok=True)
+        model.save_pretrained(
+            output_dir,
+            safe_serialization=True
+        )
+        # Push to Hugging Face Hub
+        model.push_to_hub(
+            repo_id=f"PathFinderKR/{train_config.model_name}-{train_config.run_name}",
+            private=True,
+            use_auth_token=os.environ.get("HUGGINGFACE_TOKEN")
+        )
 
 
 if __name__ == "__main__":

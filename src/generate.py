@@ -1,17 +1,12 @@
 import os
 import torch
 from transformers import AutoTokenizer
-import sys
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from src.utils import set_seed
 from models.GPT2 import GPT
 from config import TokenizerConfig, ModelConfig, GenerationConfig
 
 
 def main():
-    # Reproducibility
-    set_seed(42)
-
     # Configuration
     tokenizer_config = TokenizerConfig()
     model_config = ModelConfig()
@@ -19,19 +14,32 @@ def main():
 
     # Device
     device = torch.device("cuda")
-    torch.set_float32_matmul_precision('high')
+    print(f"Device: {torch.cuda.get_device_name(device)}")
+    torch.set_float32_matmul_precision(generation_config.matmul_precision)
+
+    # Reproducibility
+    set_seed(42)
 
     # Tokenizer
-    tokenizer = AutoTokenizer.from_pretrained(tokenizer_config.tokenizer_id)
+    tokenizer = AutoTokenizer.from_pretrained(
+        tokenizer_config.tokenizer_id,
+        use_fast=True
+    )
+    print(f"Tokenizer: {tokenizer}")
 
     # Model
     model = GPT(model_config).to(device=device)
     model = model.compile(model)
     if os.path.exists(generation_config.checkpoint_path):
-        checkpoint = torch.load(generation_config.checkpoint_path, map_location=device)
-        model.load_state_dict(checkpoint['model_state_dict'])
+        model = model.from_pretrained(
+            generation_config.checkpoint_path,
+            device_map="auto",
+            torch_dtype=torch.float16,
+            low_cpu_mem_usage=True
+        )
     else:
         raise FileNotFoundError(f"No checkpoint found at {generation_config.checkpoint_path}")
+    print(model)
 
     # Generate
     while True:

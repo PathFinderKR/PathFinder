@@ -2,8 +2,10 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from huggingface_hub import PyTorchModelHubMixin
 #from transformer_engine.pytorch import fp8_autocast
 from src.config import ModelConfig
+
 
 class MultiHeadAttention(nn.Module):
     def __init__(self, config: ModelConfig):
@@ -55,7 +57,10 @@ class FeedForward(nn.Module):
     def __init__(self, config: ModelConfig):
         super().__init__()
         self.fc1 = nn.Linear(config.d_embed, config.d_ff, bias=config.mlp_bias)
-        self.activation = config.activation()
+        self.activation = {
+            "relu": nn.ReLU,
+            "gelu": nn.GELU,
+        }[config.activation]()
         self.fc2 = nn.Linear(config.d_ff, config.d_embed, bias=config.mlp_bias)
         self.dropout = nn.Dropout(config.dropout)
 
@@ -71,7 +76,10 @@ class Expert(nn.Module):
     def __init__(self, config: ModelConfig):
         super().__init__()
         self.fc1 = nn.Linear(config.d_embed, config.d_ff, bias=config.mlp_bias)
-        self.activation = config.activation()
+        self.activation = {
+            "relu": nn.ReLU,
+            "gelu": nn.GELU,
+        }[config.activation]()
         self.fc2 = nn.Linear(config.d_ff, config.d_embed, bias=config.mlp_bias)
         self.dropout = nn.Dropout(config.dropout)
 
@@ -157,8 +165,8 @@ class RouterFreeMoE(nn.Module):
         with torch.no_grad():
             # if Device compute capabilities is 8.9 or higher, use fp8_autocast
             if torch.cuda.get_device_capability()[0] >= 8 and torch.cuda.get_device_capability()[1] >= 9:
-                ctx = fp8_autocast(enabled=True)
-                print("FP8 execution enabled")
+                #ctx = fp8_autocast(enabled=True)
+                ctx = torch.autocast(device_type="cuda", dtype=torch.bfloat16)
             else:
                 ctx = torch.autocast(device_type="cuda", dtype=torch.bfloat16)
             with ctx:
@@ -201,7 +209,7 @@ class Block(nn.Module):
         return x
 
 
-class GPT(nn.Module):
+class GPT(nn.Module, PyTorchModelHubMixin):
     def __init__(self, config: ModelConfig):
         super().__init__()
         self.config = config
