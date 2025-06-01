@@ -18,7 +18,6 @@ class MultiHeadAttention(nn.Module):
 
         self.flash = hasattr(F, "scaled_dot_product_attention")
         if not self.flash:
-            print("Flash attention not available, using standard implementation.")
             self.scale = config.d_head ** -0.5
             self.attn_dropout = nn.Dropout(config.dropout)
             self.register_buffer(
@@ -26,7 +25,7 @@ class MultiHeadAttention(nn.Module):
                 torch.tril(torch.ones(config.max_seq_len, config.max_seq_len)).view(1, 1, config.max_seq_len, config.max_seq_len)
             )
 
-    def forward(self, x):
+    def forward(self, x, kv_cache: tuple = None):
         batch_size, seq_len, _ = x.size()
 
         # Linear projection
@@ -35,15 +34,27 @@ class MultiHeadAttention(nn.Module):
         k = k.view(batch_size, seq_len, self.config.n_heads, self.config.d_head).transpose(1, 2)  # [batch_size, n_heads, seq_len, d_head]
         v = v.view(batch_size, seq_len, self.config.n_heads, self.config.d_head).transpose(1, 2)  # [batch_size, n_heads, seq_len, d_head]
 
+        if kv_cache is not None:
+            k_cache, v_cache = kv_cache
+            k = torch.cat((k_cache, k), dim=2)  # [batch_size, n_heads, seq_len + cache_len, d_head]
+            v = torch.cat((v_cache, v), dim=2)  # [batch_size, n_heads, seq_len + cache_len, d_head]
+        kv_current = (k, v)
+
         # Casual self-attention
         if self.flash:
-            attn = F.scaled_dot_product_attention(q, k, v, dropout_p=self.config.dropout if self.training else 0.0, is_causal=True)  # [batch_size, n_heads, seq_len, d_head]
+            attn = F.scaled_dot_product_attention(
+                q, k, v,
+                dropout_p=self.config.dropout if self.training else 0.0,
+                is_causal=True
+            )  # [batch_size, n_heads, seq_len, d_head]
         else:
             attn = (q @ k.transpose(-2, -1)) * self.scale  # [batch_size, n_heads, seq_len, seq_len]
             attn = attn.masked_fill(self.mask[:, :, :seq_len, :seq_len] == 0, float('-inf'))
             attn = F.softmax(attn, dim=-1)
             attn = self.attn_dropout(attn)
             attn = attn @ v  # [batch_size, n_heads, seq_len, d_head]
+
+        # Reshape and concatenate heads
         attn = attn.transpose(1, 2).contiguous().view(batch_size, seq_len, self.config.d_embed)  # [batch_size, seq_len, d_embed]
 
         # Output projection
@@ -203,7 +214,7 @@ class Block(nn.Module):
         else:
             self.mlp = FeedForward(config)
 
-    def forward(self, x):
+    def forward(self, x, kv_cache = None):
         x = x + self.attn(self.norm1(x))
         x = x + self.mlp(self.norm2(x))
         return x
@@ -227,7 +238,7 @@ class GPT(nn.Module, PyTorchModelHubMixin):
         if isinstance(module, nn.Linear):
             torch.nn.init.kaiming_uniform_(module.weight, a=math.sqrt(5))
             if module.bias is not None:
-                fan_in, _ = torch.nn.init._calculate_fan_in_and_fan_out(module.weight)
+                fan_in, _ = nn.init._calculate_fan_in_and_fan_out(module.weight)
                 bound = 1 / math.sqrt(fan_in)
                 torch.nn.init.uniform_(module.bias, -bound, bound)
         elif isinstance(module, nn.Embedding):
@@ -239,7 +250,7 @@ class GPT(nn.Module, PyTorchModelHubMixin):
     def num_active_params(self):
         pass
 
-    def forward(self, idx, targets=None):
+    def forward(self, idx, targets=None, kv_cache=None):
         device = idx.device
         batch_size, seq_len = idx.size()
 

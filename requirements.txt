@@ -5,4 +5,4 @@ transformers
 datasets
 numpy
 requests
-ipywidgets
+huggingface-hub
