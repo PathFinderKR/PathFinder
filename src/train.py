@@ -44,7 +44,8 @@ class Trainer:
             wandb.init(
                 project=self.train_config.wandb_project,
                 name=f"{self.train_config.model_name}-{self.train_config.run_name}",
-                config=self.train_config.__dict__
+                config=self.train_config.__dict__,
+                dir="../"
             )
             wandb.watch(self.model, log="all")
 
