@@ -57,17 +57,18 @@ class ModelConfig:
     # Attention
     n_heads: int = 12
     d_head: int = 64
-    attn_bias: bool = True
+    flash: bool = False
+    attn_bias: bool = False
     attn_type: Literal["mha", "gqa", "mla"] = "mha"
     n_kv_heads: Optional[int] = None
-    d_latent: Optional[int] = None
+    rank: Optional[int] = None
     ## Mixture of Attention Heads
     n_activated_heads: Optional[int] = None
     n_shared_heads: Optional[int] = None
 
     # FeedForward
     d_ff: int = 3072
-    mlp_bias: bool = True
+    mlp_bias: bool = False
     activation: Literal["relu", "gelu"] = "gelu"
     d_ff_multiplier: Optional[float] = None
     d_ff_multiple_of: int = 256
@@ -79,8 +80,9 @@ class ModelConfig:
 
 @dataclass
 class GenerationConfig:
-    checkpoint_path: str = "../checkpoints/nanoGPT/2025-05-31_09-24-38"
+    checkpoint_path: str = "../checkpoints/nanoGPT/2025-05-31_17-46-15"
     matmul_precision: Literal["highest", "high", "medium"] = "high"
+    use_cache: bool = True
     max_new_tokens: int = 100
     temperature: float = 1.0
     top_k: int = 50

@@ -2,7 +2,7 @@ import os
 import torch
 from transformers import AutoTokenizer
 from src.utils import set_seed
-from models.GPT2 import GPT
+from models.GPT import GPT
 from config import TokenizerConfig, ModelConfig, GenerationConfig
 
 
@@ -47,9 +47,11 @@ def main():
         print("🤖 Model Response:")
         output = model.generate(
             input_ids,
+            use_cache=generation_config.use_cache,
             max_new_tokens=generation_config.max_new_tokens,
             temperature=generation_config.temperature,
-            top_k=generation_config.top_k
+            top_k=generation_config.top_k,
+            tokenizer=tokenizer
         )
         response = tokenizer.decode(output[0], skip_special_tokens=True)
         print(response)

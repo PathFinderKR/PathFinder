@@ -5,7 +5,7 @@
       <paths name="AMD-7700">
         <serverdata>
           <mappings>
-            <mapping deploy="/home/pathfinder/projects/PathFinder" local="$PROJECT_DIR$" />
+            <mapping local="$PROJECT_DIR$" web="/" />
           </mappings>
         </serverdata>
       </paths>

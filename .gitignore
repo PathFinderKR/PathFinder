@@ -2,6 +2,7 @@
 /datasets/OpenWebText
 /checkpoints
 /wandb
+/char_vocab.json
 
 
 ### PyCharm template

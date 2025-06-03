@@ -11,6 +11,14 @@ class CharTokenizer:
         Args:
             vocab (dict, optional): A pre-defined vocabulary mapping. If None, it will be built from data.
         """
+
+        self.SPECIAL_TOKENS = [
+            "<|begin_of_text|>",  # BOS
+            "<|end_of_text|>",    # EOS
+            "<|UNK|>",            # Unknown token
+            "<|PAD|>",            # Padding token
+        ]
+
         if vocab is not None:
             self.char2idx = vocab
             self.idx2char = {idx: char for char, idx in vocab.items()}
@@ -28,10 +36,19 @@ class CharTokenizer:
             text (str): The text data to build the vocabulary from.
         """
         unique_chars = sorted(set(text))
-        print(f"Unique characters: {len(unique_chars)}")
-        self.char2idx = {char: idx for idx, char in enumerate(unique_chars)}
+        start_idx = len(self.SPECIAL_TOKENS)
+
+        # Character to index mapping
+        self.char2idx = {char: idx for idx, char in enumerate(self.SPECIAL_TOKENS)}
+        for idx, char in enumerate(unique_chars, start=start_idx):
+            if char not in self.char2idx:
+                self.char2idx[char] = idx
+
+        # Index to character mapping
         self.idx2char = {idx: char for char, idx in self.char2idx.items()}
+
         self.vocab_size = len(self.char2idx)
+        print(f"Vocabulary size: {self.vocab_size}")
 
     def encode(self, text: str) -> torch.Tensor:
         """
@@ -48,7 +65,7 @@ class CharTokenizer:
             if char in self.char2idx:
                 ids.append(self.char2idx[char])
             else:
-                ids.append(self.char2idx["?"])
+                ids.append(self.char2idx["<|UNK|>"])
         return torch.tensor(ids, dtype=torch.long)
 
     def decode(self, tokens: torch.Tensor) -> str:

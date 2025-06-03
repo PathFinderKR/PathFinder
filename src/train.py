@@ -14,7 +14,7 @@ from transformers import AutoTokenizer, get_cosine_schedule_with_warmup
 from datasets import load_from_disk
 import wandb
 from src.utils import set_seed
-from models.GPT2 import GPT
+from models.GPT import GPT
 from src.config import TokenizerConfig, ModelConfig, DatasetConfig, TrainConfig
 
 
@@ -44,8 +44,7 @@ class Trainer:
             wandb.init(
                 project=self.train_config.wandb_project,
                 name=f"{self.train_config.model_name}-{self.train_config.run_name}",
-                config=self.train_config.__dict__,
-                dir="../wandb"
+                config=self.train_config.__dict__
             )
             wandb.watch(self.model, log="all")
 
@@ -76,7 +75,7 @@ class Trainer:
                 target_ids = batch["target_ids"].to(self.device)
 
                 with self.ctx:
-                    outputs, loss = self.model(input_ids, target_ids)
+                    outputs, loss, _ = self.model(input_ids, target_ids)
                 loss = loss / self.train_config.gradient_accumulation_steps
                 loss.backward()
 
@@ -121,7 +120,7 @@ class Trainer:
             val_target_ids = val_batch["target_ids"].to(self.device)
 
             with self.ctx:
-                _, val_loss = self.model(val_input_ids, val_target_ids)
+                _, val_loss, _ = self.model(val_input_ids, val_target_ids)
             total_val_loss += val_loss.item() * val_input_ids.size(0)
             total_samples += val_input_ids.size(0)
 
