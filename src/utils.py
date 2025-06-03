@@ -3,6 +3,7 @@ import random
 import numpy as np
 from typing import Tuple, Optional
 import torch
+import torch.nn as nn
 #import transformer_engine.pytorch as te
 
 
@@ -62,37 +63,57 @@ def split_text(text: str, val_size: float) -> Tuple[str, str]:
 
 
 def speedometer(
-    module: torch.nn.Module,
-    input: torch.Tensor,
-    output_grad: torch.Tensor,
-    forward_kwargs: dict = {},
-    fp8_autocast_kwargs: Optional[dict] = None,
-    timing_iters: int = 50,
-    warmup_iters: int = 50,
+        model: nn.Module,
+        input_ids: torch.Tensor,
+        use_cache: bool,
+        warmup_tokens: int = 100,
+        timing_tokens: int = 100,
+        num_runs: int = 5,
+        **generate_kwargs
 ) -> None:
-    """Measure average run time for a PyTorch module
-
-    Performs forward and backward passes.
     """
-    start = torch.cuda.Event(enable_timing=True)
-    end = torch.cuda.Event(enable_timing=True)
-    if fp8_autocast_kwargs is None:
-        fp8_autocast_kwargs = {"enabled": False}
+    Measure inference speed of a model.
 
+    Args:
+        model (nn.Module): The model to measure speed for.
+        input_ids (torch.Tensor): Input IDs for the model.
+        use_cache (bool): Whether to use cache for generation.
+        warmup_tokens (int): Number of tokens to warmup the model. Defaults to 100.
+        timing_tokens (int): Number of tokens to time the model. Defaults to 100.
+        num_runs (int): Number of runs to measure speed. Defaults to 5.
+        **generate_kwargs: Additional keyword arguments for model generation.
+    """
     # Warmup runs
     torch.cuda.synchronize()
-    for _ in range(warmup_iters):
-        with te.fp8_autocast(**fp8_autocast_kwargs):
-            output = module(input, **forward_kwargs)
-        output.backward(output_grad)
+    model.generate(
+        input_ids,
+        use_cache=use_cache,
+        max_new_tokens=warmup_tokens,
+        **generate_kwargs
+    )
 
-    # Timing runs
-    start.record()
-    for _ in range(timing_iters):
-        with te.fp8_autocast(**fp8_autocast_kwargs):
-            output = module(input, **forward_kwargs)
-        output.backward(output_grad)
-    end.record()
-    torch.cuda.synchronize()
+    # Multiple timing runs
+    times = []
+    for _ in range(num_runs):
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
 
-    print(f"Mean time: {start.elapsed_time(end)/timing_iters} ms")
+        torch.cuda.synchronize()
+        start.record()
+        model.generate(
+            input_ids,
+            use_cache=use_cache,
+            max_new_tokens=timing_tokens,
+            **generate_kwargs
+        )
+        end.record()
+        torch.cuda.synchronize()
+
+        times.append(start.elapsed_time(end))
+
+    avg_time = sum(times) / len(times)
+    tokens_per_second = timing_tokens / (avg_time / 1000)  # Convert ms to seconds
+
+    print(f"Average total time: {avg_time:.2f} ms")
+    print(f"Time per token: {avg_time/timing_tokens:.2f} ms")
+    print(f"Tokens per second: {tokens_per_second:.2f}")

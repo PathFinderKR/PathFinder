@@ -39,6 +39,8 @@ class MultiHeadAttention(nn.Module):
             v = torch.cat([v_cache, v], dim=1)
         kv_seq_len = k.size(1)
         new_kv_cache = (k, v)
+        # new_kv_cache[0] -> k, new_kv_cache[1] -> v
+        # k, v: [batch_size, seq_len, d_embed]
 
         q = q.view(batch_size, seq_len, self.config.n_heads, self.config.d_head).transpose(1, 2)
         k = k.view(batch_size, kv_seq_len, self.config.n_heads, self.config.d_head).transpose(1,2)
@@ -86,6 +88,104 @@ class FeedForward(nn.Module):
         x = self.fc2(x)         # [batch_size, seq_len, d_embed]
         x = self.dropout(x)
         return x
+
+
+class Router(nn.Module):
+    def __init__(self, config: ModelConfig):
+        super().__init__()
+        self.top_k = config.n_activated_experts
+        self.gate = nn.Linear(config.d_embed, config.n_experts)
+
+    def forward(self, x):
+        logits = self.gate(x)  # [batch_size, seq_len, n_experts]
+        scores = F.softmax(logits, dim=-1)
+        scores, indices = torch.topk(scores, self.top_k, dim=-1)  # [batch_size, seq_len, top_k]
+        return scores, indices
+
+
+class MoE(nn.Module):
+    def __init__(self, config: ModelConfig):
+        super().__init__()
+        self.top_k = config.n_activated_experts
+        if config.n_experts is None or config.n_activated_experts is None:
+            raise ValueError("n_experts and n_activated_experts must be specified for MoE")
+        if config.n_experts < config.n_activated_experts:
+            raise ValueError("n_experts must be greater than or equal to n_activated_experts")
+        self.router = Router(config)
+        self.experts = nn.ModuleList([FeedForward(config) for _ in range(config.n_experts)])
+        if config.n_shared_experts is not None:
+            self.shared_experts = nn.ModuleList([FeedForward(config) for _ in range(config.n_shared_experts)])
+        else:
+            self.shared_experts = None
+
+    def forward(self, x):
+        batch_size, seq_len, d_embed = x.size()
+        scores, indices = self.router(x)
+
+        x_flat = x.view(-1, d_embed)  # [batch * seq, d_embed]
+        scores_flat = scores.view(-1, self.top_k)  # [batch * seq, top_k]
+        indices_flat = indices.view(-1, self.top_k)  # [batch * seq, top_k]
+
+        y_flat = torch.zeros_like(x_flat)
+
+        for expert_idx, expert in enumerate(self.experts):
+            mask = (indices_flat == expert_idx)
+            selected_pos = mask.any(dim=-1)  # [batch * seq]
+
+            if selected_pos.any():
+                expert_input = x_flat[selected_pos]  # [top_k, d_embed]
+                expert_output = expert(expert_input)
+
+                selected_mask_idx, selected_topk_idx = torch.where(mask)
+                gating_scores = scores_flat[selected_mask_idx, selected_topk_idx].unsqueeze(1)  # [top_k, 1]
+
+                weighted_output = expert_output * gating_scores  # [top_k, d_embed]
+                y_flat[selected_pos] += weighted_output  # [batch * seq, d_embed]
+
+        if self.shared_experts is not None:
+            shared_output = sum([expert(x_flat) for expert in self.shared_experts]) / len(self.shared_experts)
+            y_flat += shared_output  # [batch * seq, d_embed]
+
+        y = y_flat.view(batch_size, seq_len, d_embed)
+        return y
+
+
+class RouterFreeMoE(nn.Module):
+    def __init__(self, config: ModelConfig):
+        super().__init__()
+        self.experts = nn.ModuleList([FeedForward(config) for _ in range(config.n_experts)])
+
+    def forward(self, x):
+        batch_size, seq_len, d_embed = x.size()
+        x_flat = x.view(-1, d_embed)  # [batch * seq, d_embed]
+
+        # Step 1: Expert selection
+        deltas = []
+        with torch.no_grad():
+            # if Device compute capabilities is 8.9 or higher, use fp8_autocast
+            if torch.cuda.get_device_capability()[0] >= 8 and torch.cuda.get_device_capability()[1] >= 9:
+                #ctx = fp8_autocast(enabled=True)
+                ctx = torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+            else:
+                ctx = torch.autocast(device_type="cuda", dtype=torch.bfloat16)
+            with ctx:
+                for expert in self.experts:
+                    expert_output = expert(x_flat)  # [batch * seq, d_embed]
+                    delta = (expert_output - x_flat).norm(dim=-1)  # [batch * seq]
+                    deltas.append(delta)
+            deltas = torch.stack(deltas, dim=0)  # [n_experts, batch * seq]
+            best_expert_idx = deltas.argmax(dim=0)  # [batch * seq]
+
+        # Step 2: Apply the best expert
+        y_flat = torch.zeros_like(x_flat)
+        for expert_idx, expert in enumerate(self.experts):
+            mask = (best_expert_idx == expert_idx)  # [batch * seq]
+            if mask.any():
+                selected_input = x_flat[mask]  # [num_selected, d_embed]
+                selected_output = expert(selected_input)  # [num_selected, d_embed]
+                y_flat[mask] = selected_output  # [batch * seq, d_embed]
+        y = y_flat.view(batch_size, seq_len, d_embed)
+        return y
 
 
 class Block(nn.Module):
@@ -144,14 +244,15 @@ class GPT(nn.Module, PyTorchModelHubMixin):
             start_idx = 0
         else:                                                      # ---------- Decoding
             idx = idx[:, -1:]
-            if kv_cache[0][0].size(1) > self.config.max_seq_len -1:
-                kv_cache_crop = []
-                for k_cache, v_cache in kv_cache:
-                    k_cache = k_cache[:, -(self.config.max_seq_len - 1):]
-                    v_cache = v_cache[:, -(self.config.max_seq_len - 1):]
-                    kv_cache_crop.append((k_cache, v_cache))
-                kv_cache = kv_cache_crop
             start_idx = kv_cache[0][0].size(1)
+            # kv_cache[n] -> layer
+            # kv_cache[n][0] -> k, kv_cache[n][1] -> v
+            # k, v: [batch_size, seq_len, d_embed]
+            if kv_cache[0][0].size(1) > self.config.max_seq_len - 1:
+                # RESET KV CACHE
+                print("Resetting KV cache")
+                kv_cache = [None] * self.config.n_layers
+                start_idx = 0
 
         _, seq_len = idx.size()
 

@@ -1,9 +1,9 @@
 import os
 import torch
 from transformers import AutoTokenizer
-from src.utils import set_seed
+from src.utils import set_seed, speedometer
 from models.GPT import GPT
-from config import TokenizerConfig, ModelConfig, GenerationConfig
+from src.config import TokenizerConfig, ModelConfig, GenerationConfig
 
 
 def main():
@@ -34,6 +34,23 @@ def main():
     else:
         raise FileNotFoundError(f"No checkpoint found at {generation_config.checkpoint_path}")
     print(model)
+
+    speedometer(
+        model=model,
+        input_ids=tokenizer.encode("a", return_tensors="pt").to(device),
+        use_cache=True,
+        warmup_tokens=100,
+        timing_tokens=100,
+        num_runs=5
+    )
+    speedometer(
+        model=model,
+        input_ids=tokenizer.encode("a", return_tensors="pt").to(device),
+        use_cache=False,
+        warmup_tokens=100,
+        timing_tokens=100,
+        num_runs=5
+    )
 
     # Generate
     while True:

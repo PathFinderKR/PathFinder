@@ -21,15 +21,15 @@ from src.config import TokenizerConfig, ModelConfig, DatasetConfig, TrainConfig
 class Trainer:
     def __init__(
             self,
-            train_config: TrainConfig,
             model: nn.Module,
+            train_config: TrainConfig,
             train_loader: DataLoader,
             val_loader: DataLoader,
             device: torch.device,
             master_process: bool
     ):
-        self.train_config = train_config
         self.model = model
+        self.train_config = train_config
         self.train_loader = train_loader
         self.val_loader = val_loader
         self.device = device
@@ -319,8 +319,8 @@ def main():
 
     # Training
     trainer = Trainer(
-        train_config=train_config,
         model=model,
+        train_config=train_config,
         train_loader=train_loader,
         val_loader=val_loader,
         device=device,

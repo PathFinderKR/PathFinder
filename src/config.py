@@ -7,12 +7,12 @@ import torch
 @dataclass
 class TrainConfig:
     debug: bool = False
-    wandb_project: str = "PathFinder"
+    wandb_project: str = "GPT"
     model_name: Literal[
         "GPT2-small", "GPT2-medium", "GPT2-large", "GPT2-xl",  # GPT-2
         "GPT2-MoE", "PathFinder",                              # custom models
         "nanoGPT", "nanoGPT-MoE"                               # nano versions
-    ] = "nanoGPT"
+    ] = "GPT2-small"
     run_name = f"{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}"
 
     # Training
@@ -20,7 +20,7 @@ class TrainConfig:
     per_device_eval_batch_size: int = 32
     gradient_accumulation_steps: int = 512 // per_device_train_batch_size  # 512 = global batch size
     num_train_epochs: int = 1
-    learning_rate: float = 2e-3 #6e-4
+    learning_rate: float = 6e-4
     weight_decay: float = 0.1
     optim: torch.optim.Optimizer = torch.optim.AdamW
     betas: tuple[float, float] = (0.9, 0.95)
