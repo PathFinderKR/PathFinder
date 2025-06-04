@@ -16,8 +16,8 @@ class TrainConfig:
     run_name = f"{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}"
 
     # Training
-    per_device_train_batch_size: int = 8
-    per_device_eval_batch_size: int = 16
+    per_device_train_batch_size: int = 32
+    per_device_eval_batch_size: int = 64
     gradient_accumulation_steps: int = 512 // per_device_train_batch_size  # 512 = global batch size
     num_train_epochs: int = 1
     learning_rate: float = 6e-4
@@ -31,14 +31,14 @@ class TrainConfig:
     seed: int = 42
     ## Precision
     mixed_precision: bool = True
-    matmul_precision: Literal["highest", "high", "medium"] = "medium"
+    matmul_precision: Literal["highest", "high", "medium"] = "high"
 
 @dataclass
 class DatasetConfig:
     dataset_id: Literal["HuggingFaceFW/fineweb-edu"] = "HuggingFaceFW/fineweb-edu"
     remote_name: Optional[str] = "sample-10BT"
     split: Optional[str] = "train"
-    local_dir: str = f"../datasets/FineWeb-Edu/10B"
+    local_dir: str = f"datasets/FineWeb-Edu/10B"
     val_size: float = 0.01
 
 @dataclass
@@ -80,7 +80,7 @@ class ModelConfig:
 
 @dataclass
 class GenerationConfig:
-    checkpoint_path: str = "../checkpoints/nanoGPT/2025-05-31_17-46-15"
+    checkpoint_path: str = "checkpoints/nanoGPT/2025-05-31_17-46-15"
     matmul_precision: Literal["highest", "high", "medium"] = "high"
     use_cache: bool = True
     max_new_tokens: int = 100

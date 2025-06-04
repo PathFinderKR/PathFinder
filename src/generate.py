@@ -1,10 +1,13 @@
 import os
+import sys
 import torch
 from transformers import AutoTokenizer
 from src.utils import set_seed, speedometer
 from models.GPT import GPT
 from src.config import TokenizerConfig, ModelConfig, GenerationConfig
-
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.append(PROJECT_ROOT)
+print(PROJECT_ROOT)
 
 def main():
     # Configuration
@@ -29,10 +32,11 @@ def main():
 
     # Model
     model = GPT(model_config)
-    if os.path.exists(generation_config.checkpoint_path):
-        model = model.from_pretrained(generation_config.checkpoint_path).to(device)
+    checkpoint_path = os.path.join(PROJECT_ROOT, generation_config.checkpoint_path)
+    if os.path.exists(checkpoint_path):
+        model = model.from_pretrained(checkpoint_path).to(device)
     else:
-        raise FileNotFoundError(f"No checkpoint found at {generation_config.checkpoint_path}")
+        raise FileNotFoundError(f"No checkpoint found at {checkpoint_path}")
     print(model)
 
     speedometer(

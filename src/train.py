@@ -1,4 +1,5 @@
 import os
+import sys
 from dotenv import load_dotenv
 from tqdm import tqdm
 from contextlib import nullcontext
@@ -13,6 +14,8 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from transformers import AutoTokenizer, get_cosine_schedule_with_warmup
 from datasets import load_from_disk
 import wandb
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.append(PROJECT_ROOT)
 from src.utils import set_seed
 from models.GPT import GPT
 from src.config import TokenizerConfig, ModelConfig, DatasetConfig, TrainConfig
@@ -45,7 +48,7 @@ class Trainer:
                 project=self.train_config.wandb_project,
                 name=f"{self.train_config.model_name}-{self.train_config.run_name}",
                 config=self.train_config.__dict__,
-                dir="../"
+                dir=PROJECT_ROOT
             )
             wandb.watch(self.model, log="all")
 
@@ -217,6 +220,7 @@ def main():
         seed_offset = 0
     ## TF32
     torch.set_float32_matmul_precision(train_config.matmul_precision)
+    print(f"MatMul Precision: {train_config.matmul_precision}")
 
     # Reproducibility
     set_seed(42 + seed_offset)
@@ -235,7 +239,8 @@ def main():
     print(f"Tokenizer: {tokenizer}")
 
     # Dataset
-    fineweb_dataset = (load_from_disk(dataset_config.local_dir))
+    dataset_path = os.path.join(PROJECT_ROOT, dataset_config.local_dir)
+    fineweb_dataset = load_from_disk(dataset_path)
     fineweb_dataset.set_format(type="torch", columns=["input_ids"])
     if master_process:
         print(fineweb_dataset)
@@ -312,7 +317,7 @@ def main():
             model,
             device_ids=[local_rank],
             output_device=local_rank,
-            find_unused_parameters=True
+            #find_unused_parameters=True
         )
 
     if master_process:
@@ -332,14 +337,14 @@ def main():
     # Save model
     if master_process:
         # Save model locally
-        output_dir = f"../checkpoints/{train_config.model_name}/{train_config.run_name}"
+        output_dir = os.path.join(PROJECT_ROOT, "checkpoints", train_config.model_name, train_config.run_name)
         os.makedirs(output_dir, exist_ok=True)
         try:
             model.save_pretrained(
                 output_dir,
                 safe_serialization=True
             )
-            print("Model saved successfully.")
+            print(f"Model saved to: {output_dir}")
         except Exception as e:
             print(f"Error saving model: {e}")
         # Push to Hugging Face Hub
