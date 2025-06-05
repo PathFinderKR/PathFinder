@@ -107,7 +107,6 @@ class Trainer:
                     if step % self.train_config.eval_steps == 0:
                         self.validate()
 
-        self.model.eval()
         self.validate()  # Final validation
         if self.master_process:
             progress_bar.close()
@@ -362,4 +361,4 @@ def main():
 if __name__ == "__main__":
     main()
 # To run DDP training, use:
-# torchrun --nproc_per_node=4 src/train.py
+# torchrun --nproc_per_node=4 train.py

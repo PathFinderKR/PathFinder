@@ -17,7 +17,7 @@ class MultiHeadAttention(nn.Module):
         else:
             # Multi Head Latent Attention
             assert config.rank < config.d_embed, "Rank must be less than embedding dimension"
-            self.Wq = nn.Linear(config.d_embed, config.rank, bias=False)
+            self.Wq = nn.Linear(config.d_embed, config.d_embed, bias=False)
             self.Wkv_down = nn.Linear(config.d_embed, config.rank, bias=False)
             self.Wk_up = nn.Linear(config.rank, config.d_embed, bias=False)
             self.Wv_up = nn.Linear(config.rank, config.d_embed, bias=False)
@@ -45,10 +45,10 @@ class MultiHeadAttention(nn.Module):
 
             if kv_cache is not None:
                 k_cache, v_cache = kv_cache                                         # kv_cache[0] -> k, kv_cache[1] -> v
-                k = torch.cat([k_cache, k], dim=1)                              # [batch_size, seq_len, d_embed]
-                v = torch.cat([v_cache, v], dim=1)                              # [batch_size, seq_len, d_embed]
+                k = torch.cat([k_cache, k], dim=1)                               # [batch_size, seq_len, d_embed]
+                v = torch.cat([v_cache, v], dim=1)                               # [batch_size, seq_len, d_embed]
             kv_seq_len = k.size(1)
-            new_kv_cache = (k, v) if not self.training else None  # Only store KV cache if inference
+            new_kv_cache = (k, v) if self.eval else None  # Only store cache if generation
 
             q = q.view(batch_size, seq_len, self.config.n_heads, self.config.d_head).transpose(1, 2)
             k = k.view(batch_size, kv_seq_len, self.config.n_heads, self.config.d_head).transpose(1, 2)
@@ -60,7 +60,7 @@ class MultiHeadAttention(nn.Module):
                 attn = F.scaled_dot_product_attention(
                     q, k, v,
                     dropout_p=self.config.dropout if self.training else 0.0,
-                    is_causal=True
+                    is_causal=True if seq_len > 1 else False
                 )                                                               # [batch_size, n_heads, seq_len, d_head]
             else:
                 attn_scores = (q @ k.transpose(-2, -1)) * self.scale           # [batch_size, n_heads, seq_len, seq_len]
@@ -91,16 +91,14 @@ class MultiHeadAttention(nn.Module):
                 k = k.view(batch_size, seq_len, self.config.n_heads, self.config.d_head).transpose(1, 2)
                 v = v.view(batch_size, seq_len, self.config.n_heads, self.config.d_head).transpose(1, 2)
                                                                                 # [batch_size, n_heads, seq_len, d_head]
-                print(f"shape of q: {q.shape}, shape of k: {k.shape}, shape of v: {v.shape}")
 
                 # ---------- Casual self-attention ---------------------------------------------------------------------
                 if self.flash:
                     attn = F.scaled_dot_product_attention(
                         q, k, v,
-                        dropout_p=self.config.dropout if self.training else 0.0,
+                        dropout_p=self.config.dropout,
                         is_causal=True
                     )                                                           # [batch_size, n_heads, seq_len, d_head]
-                    print(f"shape of attn: {attn.shape}")
                 else:
                     attn_scores = (q @ k.transpose(-2, -1)) * self.scale       # [batch_size, n_heads, seq_len, seq_len]
                     attn_scores = attn_scores.masked_fill(self.mask[:, :, :seq_len, :seq_len] == 0, float('-inf'))
@@ -118,11 +116,13 @@ class MultiHeadAttention(nn.Module):
 
             else:
                 # ---------- Linear projection -------------------------------------------------------------------------
-                q_latent = self.Wq(x) @ self.Wk_up.T                                             # [batch_size, 1, rank]
+                Wq_up = self.Wq.weight.T @ self.Wk_up.weight                                           # [d_embed, rank]
+                q_latent = x @ Wq_up                                                             # [batch_size, 1, rank]
                 kv_latent = self.Wkv_down(x)                                                     # [batch_size, 1, rank]
 
                 # KV cache
-                kv_latent = torch.cat([kv_cache, kv_latent], dim=1)                # [batch_size, seq_len, rank]
+                if kv_cache is not None:
+                    kv_latent = torch.cat([kv_cache, kv_latent], dim=1)             # [batch_size, seq_len, rank]
                 kv_seq_len = kv_latent.size(1)
                 new_kv_cache = kv_latent
 
@@ -130,7 +130,7 @@ class MultiHeadAttention(nn.Module):
                 if self.flash:
                     attn_latent = F.scaled_dot_product_attention(
                         q_latent, kv_latent, kv_latent,
-                        is_causal=True
+                        is_causal=True if seq_len > 1 else False
                     )                                                           # [batch_size, n_heads, seq_len, d_head]
                 else:
                     attn_scores = (q_latent @ kv_latent.transpose(-2, -1)) * self.scale # [batch_size, seq_len, seq_len]
@@ -282,6 +282,7 @@ class GPT(nn.Module, PyTorchModelHubMixin):
     def __init__(self, config: ModelConfig):
         super().__init__()
         self.config = config
+        self.inference_mode = False
         self.token_embedding = nn.Embedding(config.vocab_size, config.d_embed)
         self.positional_encoding = nn.Embedding(config.max_seq_len, config.d_embed)
         self.dropout = nn.Dropout(config.dropout)
@@ -310,16 +311,28 @@ class GPT(nn.Module, PyTorchModelHubMixin):
             start_idx = 0
         # Decoding
         else:
-            idx = idx[:, -1:]
-            start_idx = kv_cache[0][0].size(1)
-            # kv_cache[n] -> layer
-            # kv_cache[n][0] -> k, kv_cache[n][1] -> v
-            # k, v: [batch_size, seq_len, d_embed]
-            if kv_cache[0][0].size(1) > self.config.max_seq_len - 1:
-                # RESET KV CACHE
-                print("Resetting KV cache")
-                kv_cache = [None] * self.config.n_layers
-                start_idx = 0
+            idx = idx[:, -1:]                                                                          # [batch_size, 1]
+            # Multi Head Attention
+            if self.config.rank is None:
+                start_idx = kv_cache[0][0].size(1)
+                # kv_cache[n] -> layer
+                # kv_cache[n][0] -> k, kv_cache[n][1] -> v
+                # k, v: [batch_size, seq_len, d_embed]
+                if kv_cache[0][0].size(1) > self.config.max_seq_len - 1:
+                    # RESET KV CACHE
+                    print("Resetting KV cache")
+                    kv_cache = [None] * self.config.n_layers
+                    start_idx = 0
+            # Multi Head Latent Attention
+            else:
+                start_idx = kv_cache[0].size(1)
+                # kv_cache[n] -> layer
+                # kv_cache: [batch_size, seq_len, rank]
+                if kv_cache[0].size(1) > self.config.max_seq_len - 1:
+                    # RESET KV CACHE
+                    print("Resetting KV cache")
+                    kv_cache = [None] * self.config.n_layers
+                    start_idx = 0
 
         _, seq_len = idx.size()
         device = idx.device
@@ -362,6 +375,7 @@ class GPT(nn.Module, PyTorchModelHubMixin):
             tokenizer = None
     ):
         self.eval()
+        self.inference_mode = True
         if not (temperature > 0):
             raise ValueError("temperature must be positive")
         if top_k is not None and top_k <= 0:
@@ -457,7 +471,7 @@ class GPT(nn.Module, PyTorchModelHubMixin):
         #
 
         ## Prefill
-        ######## Flash Attention ########
+        ######### Flash Attention #########
         # 1. Read Q, K, V from HBM
         # bytes = 3 x (2 x B x T x D) = 6BTD
         # 2. Compute Q @ K
@@ -466,7 +480,7 @@ class GPT(nn.Module, PyTorchModelHubMixin):
         # FLOPS = 2 × B × T × T × D = 2BT^2D
         # 4. Write attn_out
         # bytes = 2 x B x T x D = 2BTD
-        ##################################
+        ####################################
         # attn bytes = 6BTD + 2BTD = 8BTD
         # attn FLOPS = 2BT^2D + 2BT^2D = 4BT^2D
         # attn AI = 4BT^2D / 8BTD = T/2
@@ -475,7 +489,7 @@ class GPT(nn.Module, PyTorchModelHubMixin):
         attn_prefill_ai = T / 2
 
         ## Decoding
-        ######## Flash Attention ########
+        ######### Flash Attention #########
         # 1. Read Q, K, V from HBM
         # bytes = 2 x B x 1 x D + 2 x (2 x B x S x D) = 2BD + 4BSD
         # 2. Compute Q @ K
@@ -484,7 +498,7 @@ class GPT(nn.Module, PyTorchModelHubMixin):
         # FLOPS = 2 × B × S × 1 × D = 2BSD
         # 4. Write attn_out
         # bytes = 2 x B x 1 x D = 2BD
-        ##################################
+        ####################################
         # attn bytes = 2BD + 4BSD + 2BD = 4BD(1 + S)
         # attn FLOPS = 2BSD + 2BSD = 4BSD
         # attn AI = 4BSD / 4BD(1 + S) = S / (1 + S) (ignore 1)
@@ -495,19 +509,18 @@ class GPT(nn.Module, PyTorchModelHubMixin):
         # FLOPS decreased by T, bytes remains the same
 
         ## KV cache
-        ######## MultiHeadAttention ##############
+        ##### MultiHeadAttention ###########
         # size = 2 x (2 x B x S x D) = 4BSD
         # AI = 1
-        ######## GroupedQueryAttention ###########
+        ##### GroupedQueryAttention ########
         # size = 2 x (2 x B x S x D / n_groups) = 4BSD / n_groups
         # AI = G (group_size)
-        ######## MultiQueryAttention #############
+        ##### MultiQueryAttention ##########
         # size = 2 x (2 x B X S x d) = 4BSD / n_heads
         # AI = n_heads
-        ######## MultiHeadLatentAttention ########
+        ##### MultiHeadLatentAttention #####
         # size = 2 x (B x S x R) = 2BSR = 4BSD / (2D/R)
         # AI = 2D/R
-
 
         # ---------- FeedForward FLOPs and Memory read/writes ----------------------------------------------------------
         # 1. Read x from HBM
@@ -520,7 +533,7 @@ class GPT(nn.Module, PyTorchModelHubMixin):
         # FLOPS = 2 x B x T x 4D x D = 8BTD^2
         # 5. Write x to HBM
         # bytes = 2 x B x T x D = 2BTD
-        ##################################
+        ####################################
         # FF bytes = 2BTD + 16D^2 + 2BTD = 4D(BT + 4D)
         # FF FLOPS = 8BTD^2 + 8BTD^2 = 16BTD^2
         # FF AI = 16BTD^2 / 4D(BT + 4D) = 4BTD / (BT + 4D) (ignore 2BT)
@@ -528,13 +541,9 @@ class GPT(nn.Module, PyTorchModelHubMixin):
         feedforward_flops = 16 * B * T * D * D
         feedforward_ai = 4 * B * T * D / (B * T + 4 * D)
 
-        flops = {}
-        flops['attn_prefill_flops'] = attn_prefill_flops
-        flops['attn_prefill_ai'] = attn_prefill_ai
-        flops['attn_decoding_flops'] = attn_decoding_flops
-        flops['attn_decoding_ai'] = attn_decoding_ai
-        flops['ff_flops'] = feedforward_flops
-        flops['ff_ai'] = feedforward_ai
+        flops = {'attn_prefill_flops': attn_prefill_flops, 'attn_prefill_ai': attn_prefill_ai,
+                 'attn_decoding_flops': attn_decoding_flops, 'attn_decoding_ai': attn_decoding_ai,
+                 'ff_flops': feedforward_flops, 'ff_ai': feedforward_ai}
 
         return flops
 
