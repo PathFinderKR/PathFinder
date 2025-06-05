@@ -17,11 +17,9 @@ class MultiHeadAttention(nn.Module):
         else:
             # Multi Head Latent Attention
             assert config.rank < config.d_embed, "Rank must be less than embedding dimension"
-            self.Wq = nn.Linear(config.d_embed, config.d_embed, bias=False)
+            self.Wq = nn.Linear(config.d_embed, config.d_embed, bias=config.attn_bias)
             self.Wkv_down = nn.Linear(config.d_embed, config.rank, bias=False)
             self.Wkv_up = nn.Linear(config.rank, 2 * config.d_embed, bias=False)
-            self.Wk_up = nn.Linear(config.rank, config.d_embed, bias=False)
-            self.Wv_up = nn.Linear(config.rank, config.d_embed, bias=False)
         self.out_proj = nn.Linear(config.d_embed, config.d_embed, bias=config.attn_bias)
         self.dropout = nn.Dropout(config.dropout)
 
@@ -48,8 +46,8 @@ class MultiHeadAttention(nn.Module):
                 k_cache, v_cache = kv_cache                                         # kv_cache[0] -> k, kv_cache[1] -> v
                 k = torch.cat([k_cache, k], dim=1)                               # [batch_size, seq_len, d_embed]
                 v = torch.cat([v_cache, v], dim=1)                               # [batch_size, seq_len, d_embed]
+            new_kv_cache = (k, v) if not self.training else None  # Only store cache if generation
             kv_seq_len = k.size(1)
-            new_kv_cache = (k, v) if self.eval else None  # Only store cache if generation
 
         ########## Multi Head Latent Attention #########################################################################
         else:
@@ -60,15 +58,15 @@ class MultiHeadAttention(nn.Module):
             # KV cache
             if kv_cache is not None:
                 kv_latent = torch.cat([kv_cache, kv_latent], dim=1)                 # [batch_size, seq_len, rank]
+            new_kv_cache = kv_latent if not self.training else None  # Only store cache if generation
             kv_seq_len = kv_latent.size(1)
-            new_kv_cache = kv_latent if self.eval else None  # Only store cache if generation
 
             k, v = self.Wkv_up(kv_latent).split(self.config.d_embed, dim=2)             # [batch_size, seq_len, d_embed]
         ################################################################################################################
 
-            q = q.view(batch_size, seq_len, self.config.n_heads, self.config.d_head).transpose(1, 2)
-            k = k.view(batch_size, kv_seq_len, self.config.n_heads, self.config.d_head).transpose(1, 2)
-            v = v.view(batch_size, kv_seq_len, self.config.n_heads, self.config.d_head).transpose(1, 2)
+        q = q.view(batch_size, seq_len, self.config.n_heads, self.config.d_head).transpose(1, 2)
+        k = k.view(batch_size, kv_seq_len, self.config.n_heads, self.config.d_head).transpose(1, 2)
+        v = v.view(batch_size, kv_seq_len, self.config.n_heads, self.config.d_head).transpose(1, 2)
                                                                                 # [batch_size, n_heads, seq_len, d_head]
 
         # ---------- Casual self-attention -----------------------------------------------------------------------------
@@ -107,9 +105,9 @@ class FeedForward(nn.Module):
         self.dropout = nn.Dropout(config.dropout)
 
     def forward(self, x):
-        x = self.fc1(x)         # [batch_size, seq_len, d_ff]
+        x = self.fc1(x)                                                                    # [batch_size, seq_len, d_ff]
         x = self.activation(x)
-        x = self.fc2(x)         # [batch_size, seq_len, d_embed]
+        x = self.fc2(x)                                                                 # [batch_size, seq_len, d_embed]
         x = self.dropout(x)
         return x
 

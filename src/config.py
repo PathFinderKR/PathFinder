@@ -16,8 +16,8 @@ class TrainConfig:
     run_name = f"{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}"
 
     # Training
-    per_device_train_batch_size: int = 32
-    per_device_eval_batch_size: int = 64
+    per_device_train_batch_size: int = 8
+    per_device_eval_batch_size: int = 16
     gradient_accumulation_steps: int = 512 // per_device_train_batch_size  # 512 = global batch size
     num_train_epochs: int = 1
     learning_rate: float = 6e-4
