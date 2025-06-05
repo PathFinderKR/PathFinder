@@ -1,7 +1,7 @@
 import os
 import random
 import numpy as np
-from typing import Tuple, Optional
+from typing import Tuple
 import torch
 import torch.nn as nn
 #import transformer_engine.pytorch as te
@@ -115,5 +115,5 @@ def speedometer(
     tokens_per_second = timing_tokens / (avg_time / 1000)  # Convert ms to seconds
 
     print(f"Average total time: {avg_time:.2f} ms")
-    print(f"Time per token: {avg_time/timing_tokens:.2f} ms")
-    print(f"Tokens per second: {tokens_per_second:.2f}")
+    print(f"Latency (Time per token): {avg_time/timing_tokens:.2f} ms")
+    print(f"Throughput (Tokens per second): {tokens_per_second:.2f}")

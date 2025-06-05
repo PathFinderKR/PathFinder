@@ -2,12 +2,11 @@ import os
 import sys
 import torch
 from transformers import AutoTokenizer
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.append(PROJECT_ROOT)
 from src.utils import set_seed, speedometer
 from models.GPT import GPT
 from src.config import TokenizerConfig, ModelConfig, GenerationConfig
-PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-sys.path.append(PROJECT_ROOT)
-print(PROJECT_ROOT)
 
 def main():
     # Configuration
