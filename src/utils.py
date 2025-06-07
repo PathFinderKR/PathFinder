@@ -114,6 +114,6 @@ def speedometer(
     avg_time = sum(times) / len(times)
     tokens_per_second = timing_tokens / (avg_time / 1000)  # Convert ms to seconds
 
-    print(f"Average total time: {avg_time:.2f} ms")
+    print(f"KV cache enabled: {use_cache}")
     print(f"Latency (Time per token): {avg_time/timing_tokens:.2f} ms")
     print(f"Throughput (Tokens per second): {tokens_per_second:.2f}")

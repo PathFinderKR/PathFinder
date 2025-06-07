@@ -79,7 +79,7 @@ class Trainer:
                 target_ids = batch["target_ids"].to(self.device)
 
                 with self.ctx:
-                    outputs, loss, _ = self.model(input_ids, target_ids)
+                    outputs, loss, _ = self.model(input_ids=input_ids, target_ids=target_ids)
                 loss = loss / self.train_config.gradient_accumulation_steps
                 loss.backward()
 
@@ -123,7 +123,7 @@ class Trainer:
             val_target_ids = val_batch["target_ids"].to(self.device)
 
             with self.ctx:
-                _, val_loss, _ = self.model(val_input_ids, val_target_ids)
+                _, val_loss, _ = self.model(input_ids=val_input_ids, target_ids=val_target_ids)
             total_val_loss += val_loss.item() * val_input_ids.size(0)
             total_samples += val_input_ids.size(0)
 
@@ -192,6 +192,15 @@ def main():
         n_experts=4,
         n_activated_experts=1,
     )  # 2.5M (0.9M)
+    pathfinder_config = ModelConfig(
+        d_embed=512,
+        n_layers=8,
+        n_heads=8,
+        d_head=64,
+        rank=64,
+        beta_min=1/2,
+        beta_max=4
+    )
 
     # Device
     ## Distributed Data Parallel (DDP) setup
@@ -302,12 +311,12 @@ def main():
         model = GPT(gpt2_xl_config).to(device)
     elif train_config.model_name == "GPT2-MoE":
         model = GPT(gpt2_moe_config).to(device)
-    elif train_config.model_name == "PathFinder":
-        model = GPT(gpt2_router_free_moe_config).to(device)
     elif train_config.model_name == "nanoGPT":
         model = GPT(nanogpt_config).to(device)
     elif train_config.model_name == "nanoGPT-MoE":
         model = GPT(nanogpt_moe_config).to(device)
+    elif train_config.model_name == "PathFinder":
+        model = GPT(pathfinder_config).to(device)
     else:
         raise ValueError(f"Unknown model name: {train_config.model_name}")
     model = torch.compile(model)

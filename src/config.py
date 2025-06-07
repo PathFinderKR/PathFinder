@@ -16,8 +16,8 @@ class TrainConfig:
     run_name = f"{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}"
 
     # Training
-    per_device_train_batch_size: int = 8
-    per_device_eval_batch_size: int = 16
+    per_device_train_batch_size: int = 8  #
+    per_device_eval_batch_size: int = 16  #
     gradient_accumulation_steps: int = 512 // per_device_train_batch_size  # 512 = global batch size
     num_train_epochs: int = 1
     learning_rate: float = 6e-4
@@ -51,15 +51,12 @@ class ModelConfig:
     max_seq_len: int = 1024
     d_embed: int = 768
     n_layers: int = 12
-    norm_eps: float = 1e-5
-    dropout: float = 0.1
 
     # Attention
+    flash: bool = True
     n_heads: int = 12
     d_head: int = 64
-    flash: bool = False
     attn_bias: bool = False
-    attn_type: Literal["mha", "gqa", "mla"] = "mha"
     n_kv_heads: Optional[int] = None
     rank: Optional[int] = None
     ## Mixture of Attention Heads
@@ -72,15 +69,21 @@ class ModelConfig:
     activation: Literal["relu", "gelu"] = "gelu"
     d_ff_multiplier: Optional[float] = None
     d_ff_multiple_of: int = 256
+    ## Layer-wise scaling
+    beta_min: Optional[float] = None
+    beta_max: Optional[float] = None
     ## Mixture of Experts
-    router_free: bool = False
+    router_free: Optional[bool] = False
     n_experts: Optional[int] = None
     n_activated_experts: Optional[int] = None
     n_shared_experts: Optional[int] = None
 
+    norm_eps: float = 1e-5
+    dropout: float = 0.1
+
 @dataclass
 class GenerationConfig:
-    checkpoint_path: str = "checkpoints/GPT2-small/2025-06-04_00-16-24"
+    checkpoint_path: str = "checkpoints/GPT2-small/2025-06-06_00-49-15"#"checkpoints/GPT2-small/2025-06-04_00-16-24"#"checkpoints/GPT2-small/2025-06-06_00-49-15"
     matmul_precision: Literal["highest", "high", "medium"] = "high"
     use_cache: bool = True
     max_new_tokens: int = 100

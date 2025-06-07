@@ -23,8 +23,9 @@ class MultiHeadAttention(nn.Module):
         self.out_proj = nn.Linear(config.d_embed, config.d_embed, bias=config.attn_bias)
         self.dropout = nn.Dropout(config.dropout)
 
-        self.flash = hasattr(F, "scaled_dot_product_attention")
-        if not self.flash:
+        if config.flash is True:
+            assert hasattr(F, "scaled_dot_product_attention"), "Flash attention requires PyTorch 2.0 or higher"
+        else:
             self.scale = config.d_head ** -0.5
             self.attn_dropout = nn.Dropout(config.dropout)
             self.register_buffer(
@@ -46,7 +47,7 @@ class MultiHeadAttention(nn.Module):
                 k_cache, v_cache = kv_cache                                         # kv_cache[0] -> k, kv_cache[1] -> v
                 k = torch.cat([k_cache, k], dim=1)                               # [batch_size, seq_len, d_embed]
                 v = torch.cat([v_cache, v], dim=1)                               # [batch_size, seq_len, d_embed]
-            new_kv_cache = (k, v) if not self.training else None  # Only store cache if generation
+            new_kv_cache = (k, v) if not self.training else None # Only store cache if generation
             kv_seq_len = k.size(1)
 
         ########## Multi Head Latent Attention #########################################################################
@@ -59,6 +60,7 @@ class MultiHeadAttention(nn.Module):
             if kv_cache is not None:
                 kv_latent = torch.cat([kv_cache, kv_latent], dim=1)                 # [batch_size, seq_len, rank]
             new_kv_cache = kv_latent if not self.training else None  # Only store cache if generation
+            #new_kv_cache = kv_latent if torch.inference_mode() else None  # Only store cache if generation ???
             kv_seq_len = kv_latent.size(1)
 
             k, v = self.Wkv_up(kv_latent).split(self.config.d_embed, dim=2)             # [batch_size, seq_len, d_embed]
@@ -70,7 +72,7 @@ class MultiHeadAttention(nn.Module):
                                                                                 # [batch_size, n_heads, seq_len, d_head]
 
         # ---------- Casual self-attention -----------------------------------------------------------------------------
-        if self.flash:
+        if self.config.flash:
             attn = F.scaled_dot_product_attention(
                 q, k, v,
                 dropout_p=self.config.dropout if self.training else 0.0,
@@ -94,14 +96,23 @@ class MultiHeadAttention(nn.Module):
 
 
 class FeedForward(nn.Module):
-    def __init__(self, config: ModelConfig):
+    def __init__(self, config: ModelConfig, layer_idx: int):
         super().__init__()
-        self.fc1 = nn.Linear(config.d_embed, config.d_ff, bias=config.mlp_bias)
+        if config.beta_min is None and config.beta_max is None:
+            d_ff = config.d_ff
+            d_ff = config.d_ff_multiple_of * ((d_ff + config.d_ff_multiple_of - 1) // config.d_ff_multiple_of)
+        # Layer-wise scaling
+        else:
+            beta = config.beta_min + (config.beta_max - config.beta_min) * layer_idx / (config.n_layers - 1)
+            d_ff = int(config.d_embed * beta)
+            d_ff = config.d_ff_multiple_of * ((d_ff + config.d_ff_multiple_of - 1) // config.d_ff_multiple_of)
+
+        self.fc1 = nn.Linear(config.d_embed, d_ff, bias=config.mlp_bias)
+        self.fc2 = nn.Linear(d_ff, config.d_embed, bias=config.mlp_bias)
         self.activation = {
             "relu": nn.ReLU,
             "gelu": nn.GELU,
         }[config.activation]()
-        self.fc2 = nn.Linear(config.d_ff, config.d_embed, bias=config.mlp_bias)
         self.dropout = nn.Dropout(config.dropout)
 
     def forward(self, x):
@@ -112,116 +123,19 @@ class FeedForward(nn.Module):
         return x
 
 
-class Router(nn.Module):
-    def __init__(self, config: ModelConfig):
-        super().__init__()
-        self.top_k = config.n_activated_experts
-        self.gate = nn.Linear(config.d_embed, config.n_experts)
-
-    def forward(self, x):
-        logits = self.gate(x)  # [batch_size, seq_len, n_experts]
-        scores = F.softmax(logits, dim=-1)
-        scores, indices = torch.topk(scores, self.top_k, dim=-1)  # [batch_size, seq_len, top_k]
-        return scores, indices
-
-
-class MoE(nn.Module):
-    def __init__(self, config: ModelConfig):
-        super().__init__()
-        self.top_k = config.n_activated_experts
-        if config.n_experts is None or config.n_activated_experts is None:
-            raise ValueError("n_experts and n_activated_experts must be specified for MoE")
-        if config.n_experts < config.n_activated_experts:
-            raise ValueError("n_experts must be greater than or equal to n_activated_experts")
-        self.router = Router(config)
-        self.experts = nn.ModuleList([FeedForward(config) for _ in range(config.n_experts)])
-        if config.n_shared_experts is not None:
-            self.shared_experts = nn.ModuleList([FeedForward(config) for _ in range(config.n_shared_experts)])
-        else:
-            self.shared_experts = None
-
-    def forward(self, x):
-        batch_size, seq_len, d_embed = x.size()
-        scores, indices = self.router(x)
-
-        x_flat = x.view(-1, d_embed)  # [batch * seq, d_embed]
-        scores_flat = scores.view(-1, self.top_k)  # [batch * seq, top_k]
-        indices_flat = indices.view(-1, self.top_k)  # [batch * seq, top_k]
-
-        y_flat = torch.zeros_like(x_flat)
-
-        for expert_idx, expert in enumerate(self.experts):
-            mask = (indices_flat == expert_idx)
-            selected_pos = mask.any(dim=-1)  # [batch * seq]
-
-            if selected_pos.any():
-                expert_input = x_flat[selected_pos]  # [top_k, d_embed]
-                expert_output = expert(expert_input)
-
-                selected_mask_idx, selected_topk_idx = torch.where(mask)
-                gating_scores = scores_flat[selected_mask_idx, selected_topk_idx].unsqueeze(1)  # [top_k, 1]
-
-                weighted_output = expert_output * gating_scores  # [top_k, d_embed]
-                y_flat[selected_pos] += weighted_output  # [batch * seq, d_embed]
-
-        if self.shared_experts is not None:
-            shared_output = sum([expert(x_flat) for expert in self.shared_experts]) / len(self.shared_experts)
-            y_flat += shared_output  # [batch * seq, d_embed]
-
-        y = y_flat.view(batch_size, seq_len, d_embed)
-        return y
-
-
-class RouterFreeMoE(nn.Module):
-    def __init__(self, config: ModelConfig):
-        super().__init__()
-        self.experts = nn.ModuleList([FeedForward(config) for _ in range(config.n_experts)])
-
-    def forward(self, x):
-        batch_size, seq_len, d_embed = x.size()
-        x_flat = x.view(-1, d_embed)  # [batch * seq, d_embed]
-
-        # Step 1: Expert selection
-        deltas = []
-        with torch.no_grad():
-            # if Device compute capabilities is 8.9 or higher, use fp8_autocast
-            if torch.cuda.get_device_capability()[0] >= 8 and torch.cuda.get_device_capability()[1] >= 9:
-                #ctx = fp8_autocast(enabled=True)
-                ctx = torch.autocast(device_type="cuda", dtype=torch.bfloat16)
-            else:
-                ctx = torch.autocast(device_type="cuda", dtype=torch.bfloat16)
-            with ctx:
-                for expert in self.experts:
-                    expert_output = expert(x_flat)  # [batch * seq, d_embed]
-                    delta = (expert_output - x_flat).norm(dim=-1)  # [batch * seq]
-                    deltas.append(delta)
-            deltas = torch.stack(deltas, dim=0)  # [n_experts, batch * seq]
-            best_expert_idx = deltas.argmax(dim=0)  # [batch * seq]
-
-        # Step 2: Apply the best expert
-        y_flat = torch.zeros_like(x_flat)
-        for expert_idx, expert in enumerate(self.experts):
-            mask = (best_expert_idx == expert_idx)  # [batch * seq]
-            if mask.any():
-                selected_input = x_flat[mask]  # [num_selected, d_embed]
-                selected_output = expert(selected_input)  # [num_selected, d_embed]
-                y_flat[mask] = selected_output  # [batch * seq, d_embed]
-        y = y_flat.view(batch_size, seq_len, d_embed)
-        return y
-
-
 class Block(nn.Module):
-    def __init__(self, config: ModelConfig):
+    def __init__(self, config: ModelConfig, layer_idx: int):
         super().__init__()
         self.norm1 = nn.LayerNorm(config.d_embed, eps=config.norm_eps)
         self.attn = MultiHeadAttention(config)
         self.norm2 = nn.LayerNorm(config.d_embed, eps=config.norm_eps)
-        self.mlp = FeedForward(config)
+        self.mlp = FeedForward(config, layer_idx=layer_idx)
 
     def forward(self, x, kv_cache):
         x = self.norm1(x)
         attn_out, new_kv_cache = self.attn(x, kv_cache=kv_cache)
         x = x + attn_out
+
         x = self.norm2(x)
         x = x + self.mlp(x)
         return x, new_kv_cache
@@ -231,11 +145,13 @@ class GPT(nn.Module, PyTorchModelHubMixin):
     def __init__(self, config: ModelConfig):
         super().__init__()
         self.config = config
-        self.inference_mode = False
         self.token_embedding = nn.Embedding(config.vocab_size, config.d_embed)
         self.positional_encoding = nn.Embedding(config.max_seq_len, config.d_embed)
         self.dropout = nn.Dropout(config.dropout)
-        self.blocks = nn.ModuleList([Block(config) for _ in range(config.n_layers)])
+        self.blocks = nn.ModuleList([
+            Block(config, layer_idx=i)
+            for i in range(config.n_layers)
+        ])
         self.norm = nn.LayerNorm(config.d_embed, eps=config.norm_eps)
         self.lm_head = nn.Linear(config.d_embed, config.vocab_size, bias=False)
         self.lm_head.weight = self.token_embedding.weight
@@ -243,6 +159,7 @@ class GPT(nn.Module, PyTorchModelHubMixin):
         self.apply(self._init_weights)
 
     # Kaiming initialization
+    # TODO
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
             torch.nn.init.kaiming_uniform_(module.weight, a=math.sqrt(5))
@@ -253,14 +170,15 @@ class GPT(nn.Module, PyTorchModelHubMixin):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.kaiming_uniform_(module.weight, a=math.sqrt(5))
 
-    def forward(self, idx, targets=None, kv_cache=None):
+    def forward(self, input_ids, target_ids=None, kv_cache=None):
         # Prefill
         if kv_cache is None:
             kv_cache = [None] * self.config.n_layers
             start_idx = 0
         # Decoding
         else:
-            idx = idx[:, -1:]                                                                          # [batch_size, 1]
+            input_ids = input_ids[:, -1:]                                                              # [batch_size, 1]
+
             # Multi Head Attention
             if self.config.rank is None:
                 start_idx = kv_cache[0][0].size(1)
@@ -272,6 +190,7 @@ class GPT(nn.Module, PyTorchModelHubMixin):
                     print("Resetting KV cache")
                     kv_cache = [None] * self.config.n_layers
                     start_idx = 0
+
             # Multi Head Latent Attention
             else:
                 start_idx = kv_cache[0].size(1)
@@ -283,11 +202,11 @@ class GPT(nn.Module, PyTorchModelHubMixin):
                     kv_cache = [None] * self.config.n_layers
                     start_idx = 0
 
-        _, seq_len = idx.size()
-        device = idx.device
+        _, seq_len = input_ids.size()
+        device = input_ids.device
 
         # ---------- Embedding -----------------------------------------------------------------------------------------
-        tok_embed = self.token_embedding(idx)                                           # [batch_size, seq_len, d_embed]
+        tok_embed = self.token_embedding(input_ids)                                     # [batch_size, seq_len, d_embed]
         pos_idx = torch.arange(start_idx, start_idx + seq_len, device=device)                                # [seq_len]
         pos_embed = self.positional_encoding(pos_idx).unsqueeze(0)                               # [1, seq_len, d_embed]
         x = tok_embed + pos_embed                                                       # [batch_size, seq_len, d_embed]
@@ -302,9 +221,9 @@ class GPT(nn.Module, PyTorchModelHubMixin):
         # ---------- Final linear layer --------------------------------------------------------------------------------
         x = self.norm(x)
         # Training
-        if targets is not None:
+        if target_ids is not None:
             logits = self.lm_head(x).view(-1, self.config.vocab_size)               # [batch_size * seq_len, vocab_size]
-            targets = targets.view(-1)                                                          # [batch_size * seq_len]
+            targets = target_ids.view(-1)                                                       # [batch_size * seq_len]
             loss = F.cross_entropy(logits, targets, ignore_index=-1)
         # Generation
         else:
@@ -324,7 +243,6 @@ class GPT(nn.Module, PyTorchModelHubMixin):
             tokenizer = None
     ):
         self.eval()
-        self.inference_mode = True
         if not (temperature > 0):
             raise ValueError("temperature must be positive")
         if top_k is not None and top_k <= 0:
@@ -356,7 +274,7 @@ class GPT(nn.Module, PyTorchModelHubMixin):
             next_idx = torch.multinomial(probs, num_samples=1)                                         # [batch_size, 1]
 
             # ---------- Concatenate -----------------------------------------------------------------------------------
-            idx = torch.cat((idx, next_idx), dim=1)                                  # [batch_size, seq_len + 1]
+            idx = torch.cat((idx, next_idx), dim=1)                                   # [batch_size, seq_len + 1]
 
             # ---------- Streaming -------------------------------------------------------------------------------------
             if tokenizer is not None and idx.size(0) == 1:
@@ -371,6 +289,7 @@ class GPT(nn.Module, PyTorchModelHubMixin):
     def num_params(self):
         return sum(p.numel() for p in self.parameters() if p.requires_grad) - self.lm_head.weight.numel()
 
+    # TODO
     def num_active_params(self):
         pass
 
@@ -457,6 +376,44 @@ class GPT(nn.Module, PyTorchModelHubMixin):
         # Why so low ai?
         # FLOPS decreased by T, bytes remains the same
 
+        ## Prefill
+        ######### Flash Attention #########
+        # 1. Read Q, K, V from HBM
+        # bytes = 3 x (2 x B x T x D) = 6BTD
+        # 2. Compute Q @ K
+        # FLOPS = 2 x B x T x T x D = 2BT^2D
+        # 3. Compute A @ V
+        # FLOPS = 2 × B × T × T × D = 2BT^2D
+        # 4. Write attn_out
+        # bytes = 2 x B x T x D = 2BTD
+        ####################################
+        # attn bytes = 6BTD + 2BTD = 8BTD
+        # attn FLOPS = 2BT^2D + 2BT^2D = 4BT^2D
+        # attn AI = 4BT^2D / 8BTD = T/2
+        #         = T
+        attn_prefill_flops = 4 * B * T * T * D
+        attn_prefill_ai = T / 2
+
+        ## Decoding
+        ######### Flash Attention #########
+        # 1. Read Q, K, V from HBM
+        # bytes = 2 x B x 1 x D + 2 x (2 x B x S x D) = 2BD + 4BSD
+        # 2. Compute Q @ K
+        # FLOPS = 2 x B x 1 x S x D = 2BSD
+        # 3. Compute A @ V
+        # FLOPS = 2 × B × S × 1 × D = 2BSD
+        # 4. Write attn_out
+        # bytes = 2 x B x 1 x D = 2BD
+        ####################################
+        # attn bytes = 2BD + 4BSD + 2BD = 4BD(1 + S)
+        # attn FLOPS = 2BSD + 2BSD = 4BSD
+        # attn AI = 4BSD / 4BD(1 + S) = S / (1 + S) (ignore 1)
+        #         = 1
+        attn_decoding_flops = 4 * B * T * D
+        attn_decoding_ai = T / (1 + T)
+        # Why so low ai?
+        # FLOPS decreased by T, bytes remains the same
+
         ## KV cache
         ##### MultiHeadAttention ###########
         # size = 2 x (2 x B x S x D) = 4BSD
@@ -490,9 +447,11 @@ class GPT(nn.Module, PyTorchModelHubMixin):
         feedforward_flops = 16 * B * T * D * D
         feedforward_ai = 4 * B * T * D / (B * T + 4 * D)
 
-        flops = {'attn_prefill_flops': attn_prefill_flops, 'attn_prefill_ai': attn_prefill_ai,
-                 'attn_decoding_flops': attn_decoding_flops, 'attn_decoding_ai': attn_decoding_ai,
-                 'ff_flops': feedforward_flops, 'ff_ai': feedforward_ai}
+        flops = {
+            'attn_prefill_flops': attn_prefill_flops, 'attn_prefill_ai': attn_prefill_ai,
+            'attn_decoding_flops': attn_decoding_flops, 'attn_decoding_ai': attn_decoding_ai,
+            'ff_flops': feedforward_flops, 'ff_ai': feedforward_ai
+        }
 
         return flops
 
