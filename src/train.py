@@ -197,7 +197,7 @@ def main():
         n_layers=8,
         n_heads=8,
         d_head=64,
-        rank=64,
+        rank=32,
         beta_min=1/2,
         beta_max=4
     )

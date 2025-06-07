@@ -43,6 +43,11 @@ class MultiHeadAttention(nn.Module):
             # ---------- Linear projection -----------------------------------------------------------------------------
             q, k, v = self.qkv_proj(x).split(self.config.d_embed, dim=2)                # [batch_size, seq_len, d_embed]
 
+            # TODO
+            # ---------- Rotary positional embeddings ------------------------------------------------------------------
+
+
+            # ---------- KV cache  -------------------------------------------------------------------------------------
             if kv_cache is not None:
                 k_cache, v_cache = kv_cache                                         # kv_cache[0] -> k, kv_cache[1] -> v
                 k = torch.cat([k_cache, k], dim=1)                               # [batch_size, seq_len, d_embed]
@@ -56,7 +61,7 @@ class MultiHeadAttention(nn.Module):
             q = self.Wq(x)                                                              # [batch_size, seq_len, d_embed]
             kv_latent = self.Wkv_down(x)                                                   # [batch_size, seq_len, rank]
 
-            # KV cache
+            # ---------- KV cache  -------------------------------------------------------------------------------------
             if kv_cache is not None:
                 kv_latent = torch.cat([kv_cache, kv_latent], dim=1)                 # [batch_size, seq_len, rank]
             new_kv_cache = kv_latent if not self.training else None  # Only store cache if generation
@@ -71,7 +76,7 @@ class MultiHeadAttention(nn.Module):
         v = v.view(batch_size, kv_seq_len, self.config.n_heads, self.config.d_head).transpose(1, 2)
                                                                                 # [batch_size, n_heads, seq_len, d_head]
 
-        # ---------- Casual self-attention -----------------------------------------------------------------------------
+        # ---------- Causal self-attention -----------------------------------------------------------------------------
         if self.config.flash:
             attn = F.scaled_dot_product_attention(
                 q, k, v,
@@ -311,7 +316,7 @@ class GPT(nn.Module, PyTorchModelHubMixin):
         B, T = x.size()
         D = self.config.d_embed
 
-        # ---------- Accelerator Intensity in Nvidia --------------------------------------------------------------------------
+        # ---------- Accelerator Intensity in Nvidia -------------------------------------------------------------------
         # FLOPs = 52.22 TFLOPs
         # Memory Bandwidth = 736.6GB/s
         # TensorCore Accelerator Intensity = 70.65
@@ -339,81 +344,101 @@ class GPT(nn.Module, PyTorchModelHubMixin):
         #
         #
 
-        ## Prefill
-        ######### Flash Attention #########
-        # 1. Read Q, K, V from HBM
-        # bytes = 3 x (2 x B x T x D) = 6BTD
-        # 2. Compute Q @ K
-        # FLOPS = 2 x B x T x T x D = 2BT^2D
-        # 3. Compute A @ V
-        # FLOPS = 2 × B × T × T × D = 2BT^2D
-        # 4. Write attn_out
-        # bytes = 2 x B x T x D = 2BTD
-        ####################################
-        # attn bytes = 6BTD + 2BTD = 8BTD
-        # attn FLOPS = 2BT^2D + 2BT^2D = 4BT^2D
-        # attn AI = 4BT^2D / 8BTD = T/2
-        #         = T
-        attn_prefill_flops = 4 * B * T * T * D
-        attn_prefill_ai = T / 2
+        ########## Multi Head Attention ################################################################################
+        if self.config.rank is None:
+            ## Prefill
+            ######### Flash Attention ##########
+            # 1. Read Q, K, V from HBM
+            # bytes = 3 x (2 x B x T x D) = 6BTD
+            # 2. Compute Q @ K
+            # FLOPS = 2 x B x T x T x D = 2BT^2D
+            # 3. Compute A @ V
+            # FLOPS = 2 × B × T × T × D = 2BT^2D
+            # 4. Write attn_out
+            # bytes = 2 x B x T x D = 2BTD
+            ####################################
+            # attn bytes = 6BTD + 2BTD = 8BTD
+            # attn FLOPS = 2BT^2D + 2BT^2D = 4BT^2D
+            # attn AI = 4BT^2D / 8BTD = T/2
+            #         = T
+            attn_prefill_flops = 4 * B * T * T * D
+            attn_prefill_ai = T / 2
 
-        ## Decoding
-        ######### Flash Attention #########
-        # 1. Read Q, K, V from HBM
-        # bytes = 2 x B x 1 x D + 2 x (2 x B x S x D) = 2BD + 4BSD
-        # 2. Compute Q @ K
-        # FLOPS = 2 x B x 1 x S x D = 2BSD
-        # 3. Compute A @ V
-        # FLOPS = 2 × B × S × 1 × D = 2BSD
-        # 4. Write attn_out
-        # bytes = 2 x B x 1 x D = 2BD
-        ####################################
-        # attn bytes = 2BD + 4BSD + 2BD = 4BD(1 + S)
-        # attn FLOPS = 2BSD + 2BSD = 4BSD
-        # attn AI = 4BSD / 4BD(1 + S) = S / (1 + S) (ignore 1)
-        #         = 1
-        attn_decoding_flops = 4 * B * T * D
-        attn_decoding_ai = T / (1 + T)
-        # Why so low ai?
-        # FLOPS decreased by T, bytes remains the same
+            ## Decoding
+            ######### Flash Attention ##########
+            # 1. Read Q, K, V from HBM
+            # bytes = 2 x B x 1 x D + 2 x (2 x B x S x D) = 2BD + 4BSD
+            # 2. Compute Q @ K
+            # FLOPS = 2 x B x 1 x S x D = 2BSD
+            # 3. Compute A @ V
+            # FLOPS = 2 × B × S × 1 × D = 2BSD
+            # 4. Write attn_out
+            # bytes = 2 x B x 1 x D = 2BD
+            ####################################
+            # attn bytes = 2BD + 4BSD + 2BD = 4BD(1 + S)
+            # attn FLOPS = 2BSD + 2BSD = 4BSD
+            # attn AI = 4BSD / 4BD(1 + S) = S / (1 + S) (ignore 1)
+            #         = 1
+            attn_decoding_flops = 4 * B * T * D
+            attn_decoding_ai = T / (1 + T)
+            # Why so low ai?
+            # FLOPS decreased by T, bytes remain the same
 
-        ## Prefill
-        ######### Flash Attention #########
-        # 1. Read Q, K, V from HBM
-        # bytes = 3 x (2 x B x T x D) = 6BTD
-        # 2. Compute Q @ K
-        # FLOPS = 2 x B x T x T x D = 2BT^2D
-        # 3. Compute A @ V
-        # FLOPS = 2 × B × T × T × D = 2BT^2D
-        # 4. Write attn_out
-        # bytes = 2 x B x T x D = 2BTD
-        ####################################
-        # attn bytes = 6BTD + 2BTD = 8BTD
-        # attn FLOPS = 2BT^2D + 2BT^2D = 4BT^2D
-        # attn AI = 4BT^2D / 8BTD = T/2
-        #         = T
-        attn_prefill_flops = 4 * B * T * T * D
-        attn_prefill_ai = T / 2
+        ########## Multi Head Latent Attention #########################################################################
+        else:
+            R = self.config.rank
+            ## Prefill
+            # 1. Read KV_latent from HBM
+            # bytes = 2 x (2 x B x T x R) = 4BTR
+            # 2. Read Wkv_up from HBM
+            # bytes = 2 x R x 2D = 4RD
+            # 3. Compute kv_latent @ Wkv_up
+            # FLOPS = 2 x B x T x R x 2D = 4BTRD
+            # 4. Write k, v to HBM
+            # bytes = 2 x (2 x B x T x D) = 4BTD
+            ######### Flash Attention ##########
+            # 1. Read Q, K, V from HBM
+            # bytes = 3 x (2 x B x T x D) = 6BTD
+            # 2. Compute Q @ K
+            # FLOPS = 2 x B x T x T x D = 2BT^2D
+            # 3. Compute A @ V
+            # FLOPS = 2 × B × T × T × D = 2BT^2D
+            # 4. Write attn_out
+            # bytes = 2 x B x T x D = 2BTD
+            ####################################
+            # attn bytes = 4BTR + 4RD + 4BTD + 6BTD + 2BTD = 4(RD + BTR + 3BTD)
+            # attn FLOPS = 4BTRD + 2BT^2D + 2BT^2D = 4BTD(R + T)
+            # attn AI = 4BTD(R + T) / 4(RD + BTR + 3BTD) = BTD(R + T) / RD + BTR + 3BTD
+            #         =
+            attn_prefill_flops = 4 * B * T * D * (R + T)
+            attn_prefill_ai = T / 2
 
-        ## Decoding
-        ######### Flash Attention #########
-        # 1. Read Q, K, V from HBM
-        # bytes = 2 x B x 1 x D + 2 x (2 x B x S x D) = 2BD + 4BSD
-        # 2. Compute Q @ K
-        # FLOPS = 2 x B x 1 x S x D = 2BSD
-        # 3. Compute A @ V
-        # FLOPS = 2 × B × S × 1 × D = 2BSD
-        # 4. Write attn_out
-        # bytes = 2 x B x 1 x D = 2BD
-        ####################################
-        # attn bytes = 2BD + 4BSD + 2BD = 4BD(1 + S)
-        # attn FLOPS = 2BSD + 2BSD = 4BSD
-        # attn AI = 4BSD / 4BD(1 + S) = S / (1 + S) (ignore 1)
-        #         = 1
-        attn_decoding_flops = 4 * B * T * D
-        attn_decoding_ai = T / (1 + T)
-        # Why so low ai?
-        # FLOPS decreased by T, bytes remains the same
+            ## Decoding
+            # 1. KV_latent from HBM
+            # bytes = 2 x (2 x B x S x R) = 4BSR
+            # 2. Read Wkv_up from HBM
+            # bytes = 2 x R x 2D = 4RD
+            # 3. Compute kv_latent @ Wkv_up
+            # FLOPS = 2 x B x S x R x 2D = 4BSRD
+            # 4. Write k, v to HBM
+            # bytes = 2 x (2 x B x S x D) = 4BSD
+            ######### Flash Attention ##########
+            # 1. Read Q, K, V from HBM
+            # bytes = 2 x B x 1 x D + 2 x (2 x B x S x D) = 2BD + 4BSD
+            # 2. Compute Q @ K
+            # FLOPS = 2 x B x 1 x S x D = 2BSD
+            # 3. Compute A @ V
+            # FLOPS = 2 × B × S × 1 × D = 2BSD
+            # 4. Write attn_out
+            # bytes = 2 x B x 1 x D = 2BD
+            ####################################
+            # attn bytes =
+            # attn FLOPS =
+            # attn AI =
+            #         =
+            attn_decoding_flops = 4 * B * T * D
+            attn_decoding_ai = T / (1 + T)
+        ################################################################################################################
 
         ## KV cache
         ##### MultiHeadAttention ###########
@@ -451,7 +476,7 @@ class GPT(nn.Module, PyTorchModelHubMixin):
         flops = {
             'attn_prefill_flops': attn_prefill_flops, 'attn_prefill_ai': attn_prefill_ai,
             'attn_decoding_flops': attn_decoding_flops, 'attn_decoding_ai': attn_decoding_ai,
-            'ff_flops': feedforward_flops, 'ff_ai': feedforward_ai
+            'feedforward_flops': feedforward_flops, 'feedforward_ai': feedforward_ai
         }
 
         return flops
@@ -462,6 +487,9 @@ def main():
     model = GPT(model_config)
     print(model)
     print(f"Number of parameters: {model.num_params() / 1e6:.2f}M")
+
+    #sample_input = torch.randint(0, model_config.vocab_size, (1, 1))
+    #print(f"Attention Prefill
 
 
 if __name__ == "__main__":
