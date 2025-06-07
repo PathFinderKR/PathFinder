@@ -79,6 +79,7 @@ class MultiHeadAttention(nn.Module):
                 is_causal=True if seq_len > 1 else False
             )                                                                   # [batch_size, n_heads, seq_len, d_head]
         else:
+            # TODO
             attn_scores = (q @ k.transpose(-2, -1)) * self.scale               # [batch_size, n_heads, seq_len, seq_len]
             attn_scores = attn_scores.masked_fill(self.mask[:, :, :seq_len, :kv_seq_len] == 0, float('-inf'))
             attn_scores = F.softmax(attn_scores, dim=-1)
