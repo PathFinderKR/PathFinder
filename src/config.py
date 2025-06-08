@@ -59,6 +59,7 @@ class ModelConfig:
     attn_bias: bool = False
     n_kv_heads: Optional[int] = None
     rank: Optional[int] = None
+    cross_layer_latent_attention: bool = False
     ## Mixture of Attention Heads
     n_activated_heads: Optional[int] = None
     n_shared_heads: Optional[int] = None

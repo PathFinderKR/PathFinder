@@ -17,9 +17,10 @@ class MultiHeadAttention(nn.Module):
         else:
             # Multi Head Latent Attention
             assert config.rank < config.d_embed, "Rank must be less than embedding dimension"
-            self.Wq = nn.Linear(config.d_embed, config.d_embed, bias=config.attn_bias)
+            self.Wq = nn.Linear(config.d_embed, config.d_embed, bias=False)
             self.Wkv_down = nn.Linear(config.d_embed, config.rank, bias=False)
-            self.Wkv_up = nn.Linear(config.rank, 2 * config.d_embed, bias=False)
+            self.Wk_up = nn.Linear(config.rank, config.d_embed, bias=False)
+            self.Wv_up = nn.Linear(config.rank, config.d_embed, bias=False)
         self.out_proj = nn.Linear(config.d_embed, config.d_embed, bias=config.attn_bias)
         self.dropout = nn.Dropout(config.dropout)
 
@@ -55,50 +56,115 @@ class MultiHeadAttention(nn.Module):
             new_kv_cache = (k, v) if not self.training else None # Only store cache if generation
             kv_seq_len = k.size(1)
 
-        ########## Multi Head Latent Attention #########################################################################
-        else:
-            # ---------- Linear projection -------------------------------------------------------------------------
-            q = self.Wq(x)                                                              # [batch_size, seq_len, d_embed]
-            kv_latent = self.Wkv_down(x)                                                   # [batch_size, seq_len, rank]
-
-            # ---------- KV cache  -------------------------------------------------------------------------------------
-            if kv_cache is not None:
-                kv_latent = torch.cat([kv_cache, kv_latent], dim=1)                 # [batch_size, seq_len, rank]
-            new_kv_cache = kv_latent if not self.training else None  # Only store cache if generation
-            #new_kv_cache = kv_latent if torch.inference_mode() else None  # Only store cache if generation ???
-            kv_seq_len = kv_latent.size(1)
-
-            k, v = self.Wkv_up(kv_latent).split(self.config.d_embed, dim=2)             # [batch_size, seq_len, d_embed]
-        ################################################################################################################
-
-        q = q.view(batch_size, seq_len, self.config.n_heads, self.config.d_head).transpose(1, 2)
-        k = k.view(batch_size, kv_seq_len, self.config.n_heads, self.config.d_head).transpose(1, 2)
-        v = v.view(batch_size, kv_seq_len, self.config.n_heads, self.config.d_head).transpose(1, 2)
+            q = q.view(batch_size, seq_len, self.config.n_heads, self.config.d_head).transpose(1, 2)
+            k = k.view(batch_size, kv_seq_len, self.config.n_heads, self.config.d_head).transpose(1, 2)
+            v = v.view(batch_size, kv_seq_len, self.config.n_heads, self.config.d_head).transpose(1, 2)
                                                                                 # [batch_size, n_heads, seq_len, d_head]
 
-        # ---------- Causal self-attention -----------------------------------------------------------------------------
-        if self.config.flash:
-            attn = F.scaled_dot_product_attention(
-                q, k, v,
-                dropout_p=self.config.dropout if self.training else 0.0,
-                is_causal=True if seq_len > 1 else False
-            )                                                                   # [batch_size, n_heads, seq_len, d_head]
-        else:
-            # TODO
-            attn_scores = (q @ k.transpose(-2, -1)) * self.scale               # [batch_size, n_heads, seq_len, seq_len]
-            attn_scores = attn_scores.masked_fill(self.mask[:, :, :seq_len, :kv_seq_len] == 0, float('-inf'))
-            attn_scores = F.softmax(attn_scores, dim=-1)
-            attn_scores = self.attn_dropout(attn_scores)
-            attn = attn_scores @ v                                              # [batch_size, n_heads, seq_len, d_head]
+            # ---------- Causal self-attention -------------------------------------------------------------------------
+            if self.config.flash:
+                attn_out = F.scaled_dot_product_attention(
+                    q, k, v,
+                    dropout_p=self.config.dropout if self.training else 0.0,
+                    is_causal=True if seq_len > 1 else False
+                )                                                               # [batch_size, n_heads, seq_len, d_head]
+            else:
+                attn_scores = (q @ k.transpose(-2, -1)) * self.scale           # [batch_size, n_heads, seq_len, seq_len]
+                attn_scores = attn_scores.masked_fill(self.mask[:, :, :seq_len, :kv_seq_len] == 0, float('-inf'))
+                attn_scores = F.softmax(attn_scores, dim=-1)
+                attn_scores = self.attn_dropout(attn_scores)
+                attn_out = attn_scores @ v                                      # [batch_size, n_heads, seq_len, d_head]
 
-        # ---------- Concatenation -------------------------------------------------------------------------------------
-        attn = attn.transpose(1, 2).contiguous().view(batch_size, seq_len, self.config.d_embed)
+            # ---------- Concatenation ---------------------------------------------------------------------------------
+            attn_out = attn_out.transpose(1, 2).contiguous().view(batch_size, seq_len, self.config.d_embed)
                                                                                         # [batch_size, seq_len, d_embed]
 
-        # ---------- Output projection ---------------------------------------------------------------------------------
-        attn_output = self.out_proj(attn)                                               # [batch_size, seq_len, d_embed]
-        attn_output = self.dropout(attn_output)
-        return attn_output, new_kv_cache
+            # ---------- Output projection -----------------------------------------------------------------------------
+            y = self.out_proj(attn_out)                                                 # [batch_size, seq_len, d_embed]
+            y = self.dropout(y)
+            return y, new_kv_cache
+
+        ########## Multi Head Latent Attention #########################################################################
+        else:
+            if not self.config.cross_layer_latent_attention:
+                if self.training:
+                    # ---------- Linear projection -------------------------------------------------------------------------
+                    q = self.Wq(x)                                                          # [batch_size, seq_len, d_embed]
+                    kv_latent = self.Wkv_down(x)                                               # [batch_size, seq_len, rank]
+                    k = self.Wk_up(kv_latent)                                               # [batch_size, seq_len, d_embed]
+                    v = self.Wv_up(kv_latent)                                               # [batch_size, seq_len, d_embed]
+
+                    q = q.view(batch_size, seq_len, self.config.n_heads, self.config.d_head).transpose(1, 2)
+                    k = k.view(batch_size, seq_len, self.config.n_heads, self.config.d_head).transpose(1, 2)
+                    v = v.view(batch_size, seq_len, self.config.n_heads, self.config.d_head).transpose(1, 2)
+                                                                                    # [batch_size, n_heads, seq_len, d_head]
+
+                    # ---------- Causal self-attention ---------------------------------------------------------------------
+                    if self.config.flash:
+                        attn_out = F.scaled_dot_product_attention(
+                            q, k, v,
+                            dropout_p=self.config.dropout,
+                            is_causal=True
+                        )                                                           # [batch_size, n_heads, seq_len, d_head]
+                    else:
+                        attn_scores = (q @ k.transpose(-2, -1)) * self.scale       # [batch_size, n_heads, seq_len, seq_len]
+                        attn_scores = attn_scores.masked_fill(self.mask[:, :, :seq_len, :seq_len] == 0, float('-inf'))
+                        attn_scores = F.softmax(attn_scores, dim=-1)
+                        attn_scores = self.attn_dropout(attn_scores)
+                        attn_out = attn_scores @ v                                  # [batch_size, n_heads, seq_len, d_head]
+
+                    # ---------- Concatenation -----------------------------------------------------------------------------
+                    attn_out = attn_out.transpose(1, 2).contiguous().view(batch_size, seq_len, self.config.d_embed)
+                                                                                            # [batch_size, seq_len, d_embed]
+
+                    # ---------- Output projection -------------------------------------------------------------------------
+                    y = self.out_proj(attn_out)                                             # [batch_size, seq_len, d_embed]
+                    y = self.dropout(y)
+                    return y, None
+
+                else:
+                    # ---------- Linear projection -------------------------------------------------------------------------
+                    q = self.Wq(x)                                                          # [batch_size, seq_len, d_embed]
+                    q = q.view(batch_size, seq_len, self.config.n_heads, self.config.d_head).transpose(1, 2)
+                                                                                    # [batch_size, n_heads, seq_len, d_head]
+                    Wk_up = self.Wk_up.weight.view(self.config.n_heads, self.config.d_head, self.config.rank)
+                    q_latent = q @ Wk_up                                              # [batch_size, n_heads, seq_len, rank]
+                    kv_latent = self.Wkv_down(x)                                               # [batch_size, seq_len, rank]
+
+                    # ---------- KV cache  ---------------------------------------------------------------------------------
+                    if kv_cache is not None:
+                        kv_latent = torch.cat([kv_cache, kv_latent], dim=1)             # [batch_size, seq_len, rank]
+                    new_kv_cache = kv_latent
+                    kv_seq_len = kv_latent.size(1)
+
+                    # ---------- Causal self-attention ---------------------------------------------------------------------
+                    kv_latent = kv_latent.unsqueeze(1)                                      # [batch_size, 1, seq_len, rank]
+                    kv_latent = kv_latent.repeat(1, self.config.n_heads, 1, 1)        # [batch_size, n_heads, seq_len, rank]
+                    if self.config.flash:
+                        attn = F.scaled_dot_product_attention(
+                            q_latent, kv_latent, kv_latent,
+                            is_causal=True if seq_len > 1 else False
+                        )                                                             # [batch_size, n_heads, seq_len, rank]
+                    else:
+                        attn_scores = (q_latent @ kv_latent.transpose(-2, -1)) * self.scale
+                        attn_scores = attn_scores.masked_fill(self.mask[:, :, :seq_len, :kv_seq_len] == 0, float('-inf'))
+                        attn_scores = F.softmax(attn_scores, dim=-1)
+                        attn = attn_scores @ kv_latent                                # [batch_size, n_heads, seq_len, rank]
+                    Wv_up = self.Wv_up.weight.view(self.config.n_heads, self.config.d_head, self.config.rank).transpose(1, 2)
+                    attn = attn @ Wv_up                                             # [batch_size, n_heads, seq_len, d_head]
+
+                    # ---------- Concatenation -----------------------------------------------------------------------------
+                    attn = attn.transpose(1, 2).contiguous().view(batch_size, seq_len, self.config.d_embed)
+                                                                                            # [batch_size, seq_len, d_embed]
+
+                    # ---------- Output projection -------------------------------------------------------------------------
+                    attn_output = self.out_proj(attn)                                       # [batch_size, seq_len, d_embed]
+                    return attn_output, new_kv_cache
+            # Cross-Layer Latent Attention
+            else:
+                if self.training:
+                    return y, None
+                else:
 
 
 class FeedForward(nn.Module):
