@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal, Optional
 from datetime import datetime
 import torch
@@ -13,7 +13,7 @@ class TrainConfig:
         "GPT2-MoE", "PathFinder",                              # custom models
         "nanoGPT", "nanoGPT-MoE"                               # nano versions
     ] = "GPT2-small"
-    run_name = f"{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}"
+    run_name: str = field(default_factory=lambda: datetime.now().strftime('%Y-%m-%d_%H-%M-%S'))
 
     # Training
     per_device_train_batch_size: int = 8  #
