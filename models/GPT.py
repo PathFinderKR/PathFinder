@@ -475,6 +475,7 @@ class GPT(nn.Module, PyTorchModelHubMixin):
     def get_flops(self, x):
         B, T = x.size()
         D = self.config.d_embed
+        N = self.config.n_heads
 
         # ---------- Accelerator Intensity in Nvidia -------------------------------------------------------------------
         # FLOPs = 52.22 TFLOPs
@@ -563,7 +564,7 @@ class GPT(nn.Module, PyTorchModelHubMixin):
             # FLOPS = 2 x B x T x T x D = 2BT^2D
             # 3. Compute A @ V
             # FLOPS = 2 × B × T × T × D = 2BT^2D
-            # 4. Write attn_out
+            # 4. Write y
             # bytes = 2 x B x T x D = 2BTD
             ####################################
             # attn bytes = 4BTR + 4RD + 4BTD + 6BTD + 2BTD = 4(RD + BTR + 3BTD)
@@ -583,18 +584,19 @@ class GPT(nn.Module, PyTorchModelHubMixin):
             # 4. Write k, v to HBM
             # bytes = 2 x (2 x B x S x D) = 4BSD
             ######### Flash Attention ##########
-            # 1. Read Q, K, V from HBM
-            # bytes = 2 x B x 1 x D + 2 x (2 x B x S x D) = 2BD + 4BSD
-            # 2. Compute Q @ K
-            # FLOPS = 2 x B x 1 x S x D = 2BSD
-            # 3. Compute A @ V
-            # FLOPS = 2 × B × S × 1 × D = 2BSD
-            # 4. Write attn_out
-            # bytes = 2 x B x 1 x D = 2BD
+            # 1. Read Q_latent, KV_latent from HBM
+            # bytes = 2 x B x S x R x D / d + 2 x B x S x R = 2BSR(D/d + 1)
+            # 2. Compute Q_latent @ K_latent
+            # FLOPS = 2 x B x 1 x S x R = 2BSR
+            # 3. Compute A @ KV_latent
+            # FLOPS = 2 x B x S x 1 x R = 2BSR
+            # 4. Write y
+            # bytes = 2 x B x 1 X R = 2BR
             ####################################
+            # 5. Compute
             # attn bytes =
             # attn FLOPS =
-            # attn AI =
+            # attn AI = 2S / (1 + S(D/d + 1))
             #         =
             attn_decoding_flops = 4 * B * T * D
             attn_decoding_ai = T / (1 + T)

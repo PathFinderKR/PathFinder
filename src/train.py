@@ -193,13 +193,15 @@ def main():
         n_activated_experts=1,
     )  # 2.5M (0.9M)
     pathfinder_config = ModelConfig(
-        d_embed=512,
+        d_embed=1024,
         n_layers=8,
-        n_heads=8,
+        n_heads=16,
         d_head=64,
         rank=32,
+        d_ff=-1,
         beta_min=1/2,
-        beta_max=8
+        beta_max=8,
+        cross_layer_attention=True
     )
 
     # Device

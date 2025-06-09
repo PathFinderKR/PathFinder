@@ -16,8 +16,8 @@ class TrainConfig:
     run_name: str = field(default_factory=lambda: datetime.now().strftime('%Y-%m-%d_%H-%M-%S'))
 
     # Training
-    per_device_train_batch_size: int = 16 #32
-    per_device_eval_batch_size: int = 32  #64
+    per_device_train_batch_size: int = 32 #16
+    per_device_eval_batch_size: int = 64 #32
     gradient_accumulation_steps: int = 512 // per_device_train_batch_size  # 512 = global batch size
     num_train_epochs: int = 1
     learning_rate: float = 6e-4
@@ -69,7 +69,7 @@ class ModelConfig:
     mlp_bias: bool = False
     activation: Literal["relu", "gelu"] = "gelu"
     d_ff_multiplier: Optional[float] = None
-    d_ff_multiple_of: int = 256
+    d_ff_multiple_of: int = 128
     ## Layer-wise scaling
     beta_min: Optional[float] = None
     beta_max: Optional[float] = None
