@@ -194,7 +194,7 @@ def main():
     )  # 2.5M (0.9M)
     pathfinder_config = ModelConfig(
         d_embed=1024,
-        n_layers=8,
+        n_layers=16,
         n_heads=16,
         d_head=64,
         rank=32,
@@ -202,7 +202,7 @@ def main():
         beta_min=1/2,
         beta_max=8,
         cross_layer_attention=True
-    )
+    ) # 179M
 
     # Device
     ## Distributed Data Parallel (DDP) setup

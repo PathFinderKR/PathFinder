@@ -69,7 +69,7 @@ class ModelConfig:
     mlp_bias: bool = False
     activation: Literal["relu", "gelu"] = "gelu"
     d_ff_multiplier: Optional[float] = None
-    d_ff_multiple_of: int = 128
+    d_ff_multiple_of: int = 256
     ## Layer-wise scaling
     beta_min: Optional[float] = None
     beta_max: Optional[float] = None

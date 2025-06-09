@@ -645,7 +645,17 @@ class GPT(nn.Module, PyTorchModelHubMixin):
 
 
 def main():
-    model_config = ModelConfig()
+    model_config = ModelConfig(
+        d_embed=1024,
+        n_layers=16,
+        n_heads=16,
+        d_head=64,
+        rank=32,
+        d_ff=-1,
+        beta_min=1 / 2,
+        beta_max=8,
+        cross_layer_attention=True
+    )
     model = GPT(model_config)
     print(model)
     print(f"Number of parameters: {model.num_params() / 1e6:.2f}M")
