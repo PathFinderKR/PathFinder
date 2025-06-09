@@ -308,7 +308,6 @@ class GPT(nn.Module, PyTorchModelHubMixin):
         self.apply(self._init_weights)
 
     # Kaiming initialization
-    # TODO
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
             torch.nn.init.kaiming_uniform_(module.weight, a=math.sqrt(5))
@@ -475,7 +474,6 @@ class GPT(nn.Module, PyTorchModelHubMixin):
     def get_flops(self, x):
         B, T = x.size()
         D = self.config.d_embed
-        N = self.config.n_heads
 
         # ---------- Accelerator Intensity in Nvidia -------------------------------------------------------------------
         # FLOPs = 52.22 TFLOPs

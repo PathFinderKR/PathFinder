@@ -12,15 +12,15 @@ class TrainConfig:
         "GPT2-small", "GPT2-medium", "GPT2-large", "GPT2-xl",  # GPT-2
         "GPT2-MoE", "PathFinder",                              # custom models
         "nanoGPT", "nanoGPT-MoE"                               # nano versions
-    ] = "PathFinder"
+    ] = "GPT2-small"
     run_name: str = field(default_factory=lambda: datetime.now().strftime('%Y-%m-%d_%H-%M-%S'))
 
     # Training
-    per_device_train_batch_size: int = 32 #16
-    per_device_eval_batch_size: int = 64 #32
+    per_device_train_batch_size: int = 16
+    per_device_eval_batch_size: int = 32
     gradient_accumulation_steps: int = 512 // per_device_train_batch_size  # 512 = global batch size
     num_train_epochs: int = 1
-    learning_rate: float = 5e-4
+    learning_rate: float = 6e-4
     weight_decay: float = 0.1
     optim: torch.optim.Optimizer = torch.optim.AdamW
     betas: tuple[float, float] = (0.9, 0.95)
@@ -31,7 +31,7 @@ class TrainConfig:
     seed: int = 42
     ## Precision
     mixed_precision: bool = True
-    matmul_precision: Literal["highest", "high", "medium"] = "high"
+    matmul_precision: Literal["highest", "high", "medium"] = "medium"
 
 @dataclass
 class DatasetConfig:

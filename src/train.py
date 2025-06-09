@@ -145,27 +145,41 @@ def main():
     train_config = TrainConfig()
 
     ## GPT-2 Configuration
-    gpt2_small_config = ModelConfig()  # 125M
+    gpt2_small_config = ModelConfig(
+        d_embed=768,
+        n_layers=12,
+        n_heads=12,
+        d_head=64,
+        d_ff=3072,
+        attn_bias=True,
+        mlp_bias=True
+    )  # 125M
     gpt2_medium_config = ModelConfig(
         d_embed=1024,
         n_layers=24,
         n_heads=16,
         d_head=64,
-        d_ff=4096
+        d_ff=4096,
+        attn_bias=True,
+        mlp_bias=True
     )  # 350M
     gpt2_large_config = ModelConfig(
         d_embed=1536,
         n_layers=24,
         n_heads=16,
         d_head=96,
-        d_ff=6144
+        d_ff=6144,
+        attn_bias=True,
+        mlp_bias=True
     )  # 760M
     gpt2_xl_config = ModelConfig(
         d_embed=2048,
         n_layers=24,
         n_heads=24,
         d_head=128,
-        d_ff=8192
+        d_ff=8192,
+        attn_bias=True,
+        mlp_bias=True
     )  # 1.3B
     gpt2_moe_config = ModelConfig(
         n_experts=4,
@@ -260,7 +274,7 @@ def main():
 
     def collate_fn(batch, pad_token_id=tokenizer.pad_token_id):
         """
-        Custom collate function to pad the input sequences and create target_ids.
+        custom collate function to pad the input sequences and create target_ids.
 
         Args:
             batch (list): List of dictionaries containing input IDs.
