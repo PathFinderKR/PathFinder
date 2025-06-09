@@ -199,7 +199,7 @@ def main():
         d_head=64,
         rank=32,
         beta_min=1/2,
-        beta_max=4
+        beta_max=8
     )
 
     # Device

@@ -7,7 +7,7 @@ import torch
 @dataclass
 class TrainConfig:
     debug: bool = False
-    wandb_project: str = "GPT"
+    wandb_project: str = "PathFinder"
     model_name: Literal[
         "GPT2-small", "GPT2-medium", "GPT2-large", "GPT2-xl",  # GPT-2
         "GPT2-MoE", "PathFinder",                              # custom models
@@ -59,7 +59,7 @@ class ModelConfig:
     attn_bias: bool = False
     n_kv_heads: Optional[int] = None
     rank: Optional[int] = None
-    cross_layer_latent_attention: bool = False
+    cross_layer_attention: bool = False
     ## Mixture of Attention Heads
     n_activated_heads: Optional[int] = None
     n_shared_heads: Optional[int] = None

@@ -7,10 +7,11 @@ from src.config import ModelConfig
 
 
 class MultiHeadAttention(nn.Module):
-    def __init__(self, config: ModelConfig):
+    def __init__(self, config: ModelConfig, layer_idx: int):
         super().__init__()
         assert config.d_embed % config.n_heads == 0, "Embedding dimension must be divisible by number of heads"
         self.config = config
+        self.layer_idx = layer_idx
         if config.rank is None:
             # Multi Head Attention
             self.qkv_proj = nn.Linear(config.d_embed, 3 * config.d_embed, bias=config.attn_bias)
@@ -86,18 +87,18 @@ class MultiHeadAttention(nn.Module):
 
         ########## Multi Head Latent Attention #########################################################################
         else:
-            if not self.config.cross_layer_latent_attention:
+            if not self.config.cross_layer_attention:
                 if self.training:
-                    # ---------- Linear projection -------------------------------------------------------------------------
-                    q = self.Wq(x)                                                          # [batch_size, seq_len, d_embed]
-                    kv_latent = self.Wkv_down(x)                                               # [batch_size, seq_len, rank]
-                    k = self.Wk_up(kv_latent)                                               # [batch_size, seq_len, d_embed]
-                    v = self.Wv_up(kv_latent)                                               # [batch_size, seq_len, d_embed]
+                    # ---------- Linear projection ---------------------------------------------------------------------
+                    q = self.Wq(x)                                                      # [batch_size, seq_len, d_embed]
+                    kv_latent = self.Wkv_down(x)                                           # [batch_size, seq_len, rank]
+                    k = self.Wk_up(kv_latent)                                           # [batch_size, seq_len, d_embed]
+                    v = self.Wv_up(kv_latent)                                           # [batch_size, seq_len, d_embed]
 
                     q = q.view(batch_size, seq_len, self.config.n_heads, self.config.d_head).transpose(1, 2)
                     k = k.view(batch_size, seq_len, self.config.n_heads, self.config.d_head).transpose(1, 2)
                     v = v.view(batch_size, seq_len, self.config.n_heads, self.config.d_head).transpose(1, 2)
-                                                                                    # [batch_size, n_heads, seq_len, d_head]
+                                                                                # [batch_size, n_heads, seq_len, d_head]
 
                     # ---------- Causal self-attention ---------------------------------------------------------------------
                     if self.config.flash:
@@ -105,66 +106,142 @@ class MultiHeadAttention(nn.Module):
                             q, k, v,
                             dropout_p=self.config.dropout,
                             is_causal=True
-                        )                                                           # [batch_size, n_heads, seq_len, d_head]
+                        )                                                       # [batch_size, n_heads, seq_len, d_head]
                     else:
-                        attn_scores = (q @ k.transpose(-2, -1)) * self.scale       # [batch_size, n_heads, seq_len, seq_len]
+                        attn_scores = (q @ k.transpose(-2, -1)) * self.scale   # [batch_size, n_heads, seq_len, seq_len]
                         attn_scores = attn_scores.masked_fill(self.mask[:, :, :seq_len, :seq_len] == 0, float('-inf'))
                         attn_scores = F.softmax(attn_scores, dim=-1)
                         attn_scores = self.attn_dropout(attn_scores)
-                        attn_out = attn_scores @ v                                  # [batch_size, n_heads, seq_len, d_head]
+                        attn_out = attn_scores @ v                              # [batch_size, n_heads, seq_len, d_head]
 
                     # ---------- Concatenation -----------------------------------------------------------------------------
                     attn_out = attn_out.transpose(1, 2).contiguous().view(batch_size, seq_len, self.config.d_embed)
-                                                                                            # [batch_size, seq_len, d_embed]
+                                                                                        # [batch_size, seq_len, d_embed]
 
-                    # ---------- Output projection -------------------------------------------------------------------------
-                    y = self.out_proj(attn_out)                                             # [batch_size, seq_len, d_embed]
+                    # ---------- Output projection ---------------------------------------------------------------------
+                    y = self.out_proj(attn_out)                                         # [batch_size, seq_len, d_embed]
                     y = self.dropout(y)
                     return y, None
 
                 else:
-                    # ---------- Linear projection -------------------------------------------------------------------------
-                    q = self.Wq(x)                                                          # [batch_size, seq_len, d_embed]
+                    # ---------- Linear projection ---------------------------------------------------------------------
+                    q = self.Wq(x)                                                      # [batch_size, seq_len, d_embed]
                     q = q.view(batch_size, seq_len, self.config.n_heads, self.config.d_head).transpose(1, 2)
-                                                                                    # [batch_size, n_heads, seq_len, d_head]
+                                                                                # [batch_size, n_heads, seq_len, d_head]
                     Wk_up = self.Wk_up.weight.view(self.config.n_heads, self.config.d_head, self.config.rank)
-                    q_latent = q @ Wk_up                                              # [batch_size, n_heads, seq_len, rank]
-                    kv_latent = self.Wkv_down(x)                                               # [batch_size, seq_len, rank]
+                    q_latent = q @ Wk_up                                          # [batch_size, n_heads, seq_len, rank]
+                    kv_latent = self.Wkv_down(x)                                           # [batch_size, seq_len, rank]
 
-                    # ---------- KV cache  ---------------------------------------------------------------------------------
+                    # ---------- KV cache  -----------------------------------------------------------------------------
                     if kv_cache is not None:
-                        kv_latent = torch.cat([kv_cache, kv_latent], dim=1)             # [batch_size, seq_len, rank]
+                        kv_latent = torch.cat([kv_cache, kv_latent], dim=1)        # [batch_size, seq_len, rank]
                     new_kv_cache = kv_latent
                     kv_seq_len = kv_latent.size(1)
 
-                    # ---------- Causal self-attention ---------------------------------------------------------------------
-                    kv_latent = kv_latent.unsqueeze(1)                                      # [batch_size, 1, seq_len, rank]
-                    kv_latent = kv_latent.repeat(1, self.config.n_heads, 1, 1)        # [batch_size, n_heads, seq_len, rank]
+                    # ---------- Causal self-attention -----------------------------------------------------------------
+                    kv_latent = kv_latent.unsqueeze(1)                                  # [batch_size, 1, seq_len, rank]
+                    kv_latent = kv_latent.repeat(1, self.config.n_heads, 1, 1)    # [batch_size, n_heads, seq_len, rank]
                     if self.config.flash:
                         attn = F.scaled_dot_product_attention(
                             q_latent, kv_latent, kv_latent,
                             is_causal=True if seq_len > 1 else False
-                        )                                                             # [batch_size, n_heads, seq_len, rank]
+                        )                                                         # [batch_size, n_heads, seq_len, rank]
                     else:
                         attn_scores = (q_latent @ kv_latent.transpose(-2, -1)) * self.scale
                         attn_scores = attn_scores.masked_fill(self.mask[:, :, :seq_len, :kv_seq_len] == 0, float('-inf'))
                         attn_scores = F.softmax(attn_scores, dim=-1)
-                        attn = attn_scores @ kv_latent                                # [batch_size, n_heads, seq_len, rank]
+                        attn = attn_scores @ kv_latent                            # [batch_size, n_heads, seq_len, rank]
                     Wv_up = self.Wv_up.weight.view(self.config.n_heads, self.config.d_head, self.config.rank).transpose(1, 2)
-                    attn = attn @ Wv_up                                             # [batch_size, n_heads, seq_len, d_head]
+                    attn = attn @ Wv_up                                         # [batch_size, n_heads, seq_len, d_head]
 
-                    # ---------- Concatenation -----------------------------------------------------------------------------
+                    # ---------- Concatenation -------------------------------------------------------------------------
                     attn = attn.transpose(1, 2).contiguous().view(batch_size, seq_len, self.config.d_embed)
-                                                                                            # [batch_size, seq_len, d_embed]
+                                                                                        # [batch_size, seq_len, d_embed]
 
-                    # ---------- Output projection -------------------------------------------------------------------------
-                    attn_output = self.out_proj(attn)                                       # [batch_size, seq_len, d_embed]
+                    # ---------- Output projection ---------------------------------------------------------------------
+                    attn_output = self.out_proj(attn)                                   # [batch_size, seq_len, d_embed]
                     return attn_output, new_kv_cache
             # Cross-Layer Latent Attention
             else:
                 if self.training:
-                    return y, None
+                    # ---------- Linear projection ---------------------------------------------------------------------
+                    q = self.Wq(x)                                                      # [batch_size, seq_len, d_embed]
+                    if self.layer_idx == 0:
+                        kv_latent = self.Wkv_down(x)                                       # [batch_size, seq_len, rank]
+                    else: # Layer 1+
+                        kv_latent = kv_cache                                               # [batch_size, seq_len, rank]
+                    k = self.Wk_up(kv_latent)                                           # [batch_size, seq_len, d_embed]
+                    v = self.Wv_up(kv_latent)                                           # [batch_size, seq_len, d_embed]
+
+                    q = q.view(batch_size, seq_len, self.config.n_heads, self.config.d_head).transpose(1, 2)
+                    k = k.view(batch_size, seq_len, self.config.n_heads, self.config.d_head).transpose(1, 2)
+                    v = v.view(batch_size, seq_len, self.config.n_heads, self.config.d_head).transpose(1, 2)
+                                                                                # [batch_size, n_heads, seq_len, d_head]
+
+                    # ---------- Causal self-attention -----------------------------------------------------------------
+                    if self.config.flash:
+                        attn_out = F.scaled_dot_product_attention(
+                            q, k, v,
+                            dropout_p=self.config.dropout,
+                            is_causal=True
+                        )                                                       # [batch_size, n_heads, seq_len, d_head]
+                    else:
+                        attn_scores = (q @ k.transpose(-2, -1)) * self.scale   # [batch_size, n_heads, seq_len, seq_len]
+                        attn_scores = attn_scores.masked_fill(self.mask[:, :, :seq_len, :seq_len] == 0, float('-inf'))
+                        attn_scores = F.softmax(attn_scores, dim=-1)
+                        attn_scores = self.attn_dropout(attn_scores)
+                        attn_out = attn_scores @ v                              # [batch_size, n_heads, seq_len, d_head]
+
+                    # ---------- Concatenation -------------------------------------------------------------------------
+                    attn_out = attn_out.transpose(1, 2).contiguous().view(batch_size, seq_len, self.config.d_embed)
+                                                                                        # [batch_size, seq_len, d_embed]
+
+                    # ---------- Output projection ---------------------------------------------------------------------
+                    y = self.out_proj(attn_out)                                         # [batch_size, seq_len, d_embed]
+                    y = self.dropout(y)
+                    return y, kv_latent
+
                 else:
+                    # ---------- Linear projection ---------------------------------------------------------------------
+                    q = self.Wq(x)                                                      # [batch_size, seq_len, d_embed]
+                    q = q.view(batch_size, seq_len, self.config.n_heads, self.config.d_head).transpose(1, 2)
+                                                                                # [batch_size, n_heads, seq_len, d_head]
+                    Wk_up = self.Wk_up.weight.view(self.config.n_heads, self.config.d_head, self.config.rank)
+                    q_latent = q @ Wk_up                                          # [batch_size, n_heads, seq_len, rank]
+
+                    # ---------- KV cache  -----------------------------------------------------------------------------
+                    if self.layer_idx == 0:
+                        kv_latent = self.Wkv_down(x)                                       # [batch_size, seq_len, rank]
+                        if kv_cache is not None:
+                            kv_latent = torch.cat([kv_cache, kv_latent], dim=1)    # [batch_size, seq_len, rank]
+                    else: # Layer 1+
+                        kv_latent = kv_cache                                               # [batch_size, seq_len, rank]
+                    new_kv_cache = kv_latent
+                    kv_seq_len = kv_latent.size(1)
+
+                    # ---------- Causal self-attention -----------------------------------------------------------------
+                    kv_latent = kv_latent.unsqueeze(1)                                  # [batch_size, 1, seq_len, rank]
+                    kv_latent = kv_latent.repeat(1, self.config.n_heads, 1, 1)    # [batch_size, n_heads, seq_len, rank]
+                    if self.config.flash:
+                        attn = F.scaled_dot_product_attention(
+                            q_latent, kv_latent, kv_latent,
+                            is_causal=True if seq_len > 1 else False
+                        )                                                         # [batch_size, n_heads, seq_len, rank]
+                    else:
+                        attn_scores = (q_latent @ kv_latent.transpose(-2, -1)) * self.scale
+                        attn_scores = attn_scores.masked_fill(self.mask[:, :, :seq_len, :kv_seq_len] == 0, float('-inf'))
+                        attn_scores = F.softmax(attn_scores, dim=-1)
+                        attn = attn_scores @ kv_latent                            # [batch_size, n_heads, seq_len, rank]
+                    Wv_up = self.Wv_up.weight.view(self.config.n_heads, self.config.d_head, self.config.rank).transpose(1, 2)
+                    attn = attn @ Wv_up                                         # [batch_size, n_heads, seq_len, d_head]
+
+                    # ---------- Concatenation -------------------------------------------------------------------------
+                    attn = attn.transpose(1, 2).contiguous().view(batch_size, seq_len, self.config.d_embed)
+                                                                                        # [batch_size, seq_len, d_embed]
+
+                    # ---------- Output projection ---------------------------------------------------------------------
+                    attn_output = self.out_proj(attn)                                   # [batch_size, seq_len, d_embed]
+                    return attn_output, new_kv_cache
 
 
 class FeedForward(nn.Module):
@@ -199,14 +276,14 @@ class Block(nn.Module):
     def __init__(self, config: ModelConfig, layer_idx: int):
         super().__init__()
         self.norm1 = nn.LayerNorm(config.d_embed, eps=config.norm_eps)
-        self.attn = MultiHeadAttention(config)
+        self.attn = MultiHeadAttention(config, layer_idx=layer_idx)
         self.norm2 = nn.LayerNorm(config.d_embed, eps=config.norm_eps)
         self.mlp = FeedForward(config, layer_idx=layer_idx)
 
     def forward(self, x, kv_cache):
         x = self.norm1(x)
-        attn_out, new_kv_cache = self.attn(x, kv_cache=kv_cache)
-        x = x + attn_out
+        y, new_kv_cache = self.attn(x, kv_cache=kv_cache)
+        x = x + y
 
         x = self.norm2(x)
         x = x + self.mlp(x)
@@ -245,14 +322,17 @@ class GPT(nn.Module, PyTorchModelHubMixin):
     def forward(self, input_ids, target_ids=None, kv_cache=None):
         # Prefill
         if kv_cache is None:
-            kv_cache = [None] * self.config.n_layers
+            if not self.config.cross_layer_attention:
+                kv_cache = [None] * self.config.n_layers
+            else:
+                kv_cache = None
             start_idx = 0
+
         # Decoding
         else:
             input_ids = input_ids[:, -1:]                                                              # [batch_size, 1]
 
-            # Multi Head Attention
-            if self.config.rank is None:
+            if self.config.rank is None:                                                          # Multi Head Attention
                 start_idx = kv_cache[0][0].size(1)
                 # kv_cache[n] -> layer
                 # kv_cache[n][0] -> k, kv_cache[n][1] -> v
@@ -263,16 +343,25 @@ class GPT(nn.Module, PyTorchModelHubMixin):
                     kv_cache = [None] * self.config.n_layers
                     start_idx = 0
 
-            # Multi Head Latent Attention
-            else:
-                start_idx = kv_cache[0].size(1)
-                # kv_cache[n] -> layer
-                # kv_latent: [batch_size, seq_len, rank]
-                if kv_cache[0].size(1) > self.config.max_seq_len - 1:
-                    # RESET KV CACHE
-                    print("Resetting KV cache")
-                    kv_cache = [None] * self.config.n_layers
-                    start_idx = 0
+            else:                                                                          # Multi Head Latent Attention
+                if not self.config.cross_layer_attention:
+                    start_idx = kv_cache[0].size(1)
+                    # kv_cache[n] -> layer
+                    # kv_cache[n]: [batch_size, seq_len, rank]
+                    if kv_cache[0].size(1) > self.config.max_seq_len - 1:
+                        # RESET KV CACHE
+                        print("Resetting KV cache")
+                        kv_cache = [None] * self.config.n_layers
+                        start_idx = 0
+                else:                                                          # Multi-Head Cross-Layer Latent Attention
+                    start_idx = kv_cache.size(1)
+                    print(f"kv_cache.size(1): {kv_cache.size(1)}")
+                    # kv_cache: [batch_size, seq_len, rank]
+                    if kv_cache.size(1) > self.config.max_seq_len - 1:
+                        # RESET KV CACHE
+                        print("Resetting KV cache")
+                        kv_cache = None
+                        start_idx = 0
 
         _, seq_len = input_ids.size()
         device = input_ids.device
@@ -286,9 +375,14 @@ class GPT(nn.Module, PyTorchModelHubMixin):
 
         # ---------- Blocks --------------------------------------------------------------------------------------------
         new_kv_cache = []
-        for layer_idx, block in enumerate(self.blocks):
-            x, kv_cache_layer = block(x, kv_cache=kv_cache[layer_idx])                  # [batch_size, seq_len, d_embed]
-            new_kv_cache.append(kv_cache_layer)
+        if not self.config.cross_layer_attention:
+            for layer_idx, block in enumerate(self.blocks):
+                x, kv_cache_layer = block(x, kv_cache=kv_cache[layer_idx])              # [batch_size, seq_len, d_embed]
+                new_kv_cache.append(kv_cache_layer)
+        else:
+            for layer_idx, block in enumerate(self.blocks):
+                x, kv_cache = block(x, kv_cache=kv_cache)                               # [batch_size, seq_len, d_embed]
+            new_kv_cache = kv_cache
 
         # ---------- Final linear layer --------------------------------------------------------------------------------
         x = self.norm(x)

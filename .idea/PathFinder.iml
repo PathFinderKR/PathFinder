@@ -7,7 +7,7 @@
       <excludeFolder url="file://$MODULE_DIR$/wandb" />
       <excludeFolder url="file://$MODULE_DIR$/checkpoints" />
     </content>
-    <orderEntry type="jdk" jdkName="torch-env" jdkType="Python SDK" />
+    <orderEntry type="jdk" jdkName="taurus" jdkType="Python SDK" />
     <orderEntry type="sourceFolder" forTests="false" />
   </component>
   <component name="PackageRequirementsSettings">
