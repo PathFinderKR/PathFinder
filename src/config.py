@@ -10,8 +10,9 @@ class TrainConfig:
     wandb_project: str = "PathFinder"
     model_name: Literal[
         "GPT2-small", "GPT2-medium", "GPT2-large", "GPT2-xl",  # GPT-2
-        "GPT2-MoE", "PathFinder",                              # custom models
-        "nanoGPT", "nanoGPT-MoE"                               # nano versions
+        "GPT2-MoE", "GPT2-MoE-router-free",                    # Mixture of Experts
+        "nanoGPT", "nanoGPT-MoE",                              # nano versions
+        "PathFinder", "PathFinder-nano",                       # custom models
     ] = "GPT2-small"
     run_name: str = field(default_factory=lambda: datetime.now().strftime('%Y-%m-%d_%H-%M-%S'))
 

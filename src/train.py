@@ -181,15 +181,19 @@ def main():
         attn_bias=True,
         mlp_bias=True
     )  # 1.3B
+
+    ## GPT-2 MoE Configuration
     gpt2_moe_config = ModelConfig(
         n_experts=4,
         n_activated_experts=1
     )  # 294M (125M)
-    gpt2_router_free_moe_config = ModelConfig(
-        n_experts=4,
-        n_activated_experts=1,
-        router_free=True
-    )  # 294M (125M)
+    #gpt2_router_free_moe_config = ModelConfig(
+    #    n_experts=4,
+    #    n_activated_experts=1,
+    #    router_free=True
+    #)  # 294M (125M)
+
+    ## nanoGPT Configuration
     nanogpt_config = ModelConfig(
         d_embed=512,
         n_layers=8,
@@ -206,6 +210,8 @@ def main():
         n_experts=4,
         n_activated_experts=1,
     )  # 2.5M (0.9M)
+
+    ## Custom Model Configuration
     pathfinder_config = ModelConfig(
         d_embed=1024,
         n_layers=16,
