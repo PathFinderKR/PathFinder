@@ -219,8 +219,8 @@ def main():
         d_head=64,
         rank=32,
         d_ff=4096,
-        beta_min=1/2,
-        beta_max=4,
+        #beta_min=1/2,
+        #beta_max=4,
         cross_layer_attention=True
     ) # 117M
 
