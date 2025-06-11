@@ -21,7 +21,7 @@ class TrainConfig:
     per_device_eval_batch_size: int = 16
     gradient_accumulation_steps: int = 512 // per_device_train_batch_size  # 512 = global batch size
     num_train_epochs: int = 1
-    learning_rate: float = 6e-4
+    learning_rate: float = 5e-4
     weight_decay: float = 0.1
     optim: torch.optim.Optimizer = torch.optim.AdamW
     betas: tuple[float, float] = (0.9, 0.95)
