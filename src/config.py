@@ -13,7 +13,7 @@ class TrainConfig:
         "GPT2-MoE", "GPT2-MoE-router-free",                    # Mixture of Experts
         "nanoGPT", "nanoGPT-MoE",                              # nano versions
         "PathFinder", "PathFinder-nano",                       # custom models
-    ] = "GPT2-small"
+    ] = "PathFinder"
     run_name: str = field(default_factory=lambda: datetime.now().strftime('%Y-%m-%d_%H-%M-%S'))
 
     # Training
@@ -32,7 +32,7 @@ class TrainConfig:
     seed: int = 42
     ## Precision
     mixed_precision: bool = True
-    matmul_precision: Literal["highest", "high", "medium"] = "medium"
+    matmul_precision: Literal["highest", "high", "medium"] = "high"
 
 @dataclass
 class DatasetConfig:

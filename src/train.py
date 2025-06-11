@@ -217,12 +217,12 @@ def main():
         n_layers=16,
         n_heads=16,
         d_head=64,
-        rank=32,
-        d_ff=-1,
-        beta_min=1/2,
-        beta_max=8,
+        rank=128,
+        d_ff=4096,
+        #beta_min=1/2,
+        #beta_max=4,
         cross_layer_attention=True
-    ) # 179M
+    ) # 117M
 
     # Device
     ## Distributed Data Parallel (DDP) setup
