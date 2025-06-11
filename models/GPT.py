@@ -19,9 +19,14 @@ class MultiHeadAttention(nn.Module):
             # Multi Head Latent Attention
             assert config.rank < config.d_embed, "Rank must be less than embedding dimension"
             self.Wq = nn.Linear(config.d_embed, config.d_embed, bias=False)
-            self.Wkv_down = nn.Linear(config.d_embed, config.rank, bias=False)
-            self.Wk_up = nn.Linear(config.rank, config.d_embed, bias=False)
-            self.Wv_up = nn.Linear(config.rank, config.d_embed, bias=False)
+            if not config.cross_layer_attention:
+                self.Wkv_down = nn.Linear(config.d_embed, config.rank, bias=False)
+                self.Wk_up = nn.Linear(config.rank, config.d_embed, bias=False)
+                self.Wv_up = nn.Linear(config.rank, config.d_embed, bias=False)
+            else:
+                self.Wkv_down = nn.Linear(config.d_embed, config.d_embed, bias=False) if layer_idx ==0 else None
+                self.Wk_up = nn.Linear(config.d_embed, config.d_embed, bias=False) if layer_idx ==0 else None
+                self.Wv_up = nn.Linear(config.d_embed, config.d_embed, bias=False) if layer_idx ==0 else None
         self.out_proj = nn.Linear(config.d_embed, config.d_embed, bias=config.attn_bias)
         self.dropout = nn.Dropout(config.dropout)
 
@@ -649,9 +654,9 @@ def main():
         n_heads=16,
         d_head=64,
         rank=32,
-        d_ff=-1,
-        beta_min=1 / 2,
-        beta_max=4,
+        d_ff=4096,
+        # beta_min=1/2,
+        # beta_max=4,
         cross_layer_attention=True
     )
     model = GPT(model_config)

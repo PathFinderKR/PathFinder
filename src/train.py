@@ -217,7 +217,7 @@ def main():
         n_layers=16,
         n_heads=16,
         d_head=64,
-        rank=128,
+        rank=32,
         d_ff=4096,
         #beta_min=1/2,
         #beta_max=4,
@@ -352,6 +352,10 @@ def main():
 
     if master_process:
         print(model)
+        if ddp:
+            print(f"Number of parameters: {model.module.num_params() / 1e6:.2f}M")
+        else:
+            print(f"Number of parameters: {model.num_parameters() / 1e6:.2f}M")
 
     # Training
     trainer = Trainer(
@@ -362,27 +366,38 @@ def main():
         device=device,
         master_process=master_process
     )
-    trainer.train()
+    #trainer.train()
 
     # Save model
     if master_process:
         # Save model locally
         output_dir = os.path.join(PROJECT_ROOT, "checkpoints", train_config.model_name, train_config.run_name)
         os.makedirs(output_dir, exist_ok=True)
-        try:
+        if ddp:
+            model.module.save_pretrained(
+                output_dir,
+                safe_serialization=True
+            )
+        else:
             model.save_pretrained(
                 output_dir,
                 safe_serialization=True
             )
-            print(f"Model saved to: {output_dir}")
-        except Exception as e:
-            print(f"Error saving model: {e}")
+        print(f"Model saved to: {output_dir}")
+
         # Push to Hugging Face Hub
-        model.push_to_hub(
-            repo_id=f"PathFinderKR/{train_config.model_name}-{train_config.run_name}",
-            private=True,
-            use_auth_token=os.environ.get("HUGGINGFACE_TOKEN")
-        )
+        if ddp:
+            model.module.push_to_hub(
+                repo_id=f"PathFinderKR/{train_config.model_name}-{train_config.run_name}",
+                private=True,
+                use_auth_token=os.environ.get("HUGGINGFACE_TOKEN")
+            )
+        else:
+            model.push_to_hub(
+                repo_id=f"PathFinderKR/{train_config.model_name}-{train_config.run_name}",
+                private=True,
+                use_auth_token=os.environ.get("HUGGINGFACE_TOKEN")
+            )
         print(f"Model pushed to Hugging Face Hub: PathFinderKR/{train_config.model_name}-{train_config.run_name}")
 
     if ddp:
