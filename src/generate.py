@@ -43,18 +43,12 @@ def main():
     speedometer(
         model=model,
         input_ids=tokenizer.encode("a", return_tensors="pt").to(device),
-        use_cache=False,
-        warmup_tokens=100,
-        timing_tokens=100,
-        num_runs=5
+        use_cache=False
     )
     speedometer(
         model=model,
         input_ids=tokenizer.encode("a", return_tensors="pt").to(device),
-        use_cache=True,
-        warmup_tokens=100,
-        timing_tokens=100,
-        num_runs=5
+        use_cache=True
     )
 
     # Generate

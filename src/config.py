@@ -13,7 +13,7 @@ class TrainConfig:
         "GPT2-MoE", "GPT2-MoE-router-free",                    # Mixture of Experts
         "nanoGPT", "nanoGPT-MoE",                              # nano versions
         "PathFinder", "PathFinder-nano",                       # custom models
-    ] = "PathFinder"
+    ] = "GPT2-small"
     run_name: str = field(default_factory=lambda: datetime.now().strftime('%Y-%m-%d_%H-%M-%S'))
 
     # Training
@@ -154,19 +154,19 @@ nanogpt_moe_config = ModelConfig(
 ## Custom Model Configuration
 pathfinder_config = ModelConfig(
     d_embed=1024,
-    n_layers=16,
+    n_layers=10,
     n_heads=16,
     d_head=64,
     rank=32,
-    d_ff=4096,
+    d_ff=-1,
     beta_min=1/2,
     beta_max=4,
     cross_layer_attention=True
-)  # 166.92M
+)  # 123.84M
 
 @dataclass
 class GenerationConfig:
-    checkpoint_path: str = "checkpoints/PathFinder/2025-06-11_20-52-36"
+    checkpoint_path: str = "checkpoints/GPT2-small/2025-06-11_21-24-06"
     matmul_precision: Literal["highest", "high", "medium"] = "high"
     use_cache: bool = True
     max_new_tokens: int = 100

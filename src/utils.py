@@ -66,9 +66,9 @@ def speedometer(
         model: nn.Module,
         input_ids: torch.Tensor,
         use_cache: bool,
-        warmup_tokens: int = 100,
-        timing_tokens: int = 100,
-        num_runs: int = 5,
+        warmup_tokens: int = 1000,
+        timing_tokens: int = 1000,
+        num_runs: int = 10,
         **generate_kwargs
 ) -> None:
     """
@@ -83,8 +83,11 @@ def speedometer(
         num_runs (int): Number of runs to measure speed. Defaults to 5.
         **generate_kwargs: Additional keyword arguments for model generation.
     """
+    print(f"KV Cache Enabled: {use_cache}")
+    print(f"Warmup Tokens: {warmup_tokens}, Timing Tokens: {timing_tokens}, Runs: {num_runs}")
+    print("-" * 50)
+
     # Warmup runs
-    torch.cuda.synchronize()
     model.generate(
         input_ids,
         use_cache=use_cache,
@@ -94,7 +97,7 @@ def speedometer(
 
     # Multiple timing runs
     times = []
-    for _ in range(num_runs):
+    for i in range(num_runs):
         start = torch.cuda.Event(enable_timing=True)
         end = torch.cuda.Event(enable_timing=True)
 
@@ -109,11 +112,26 @@ def speedometer(
         end.record()
         torch.cuda.synchronize()
 
-        times.append(start.elapsed_time(end))
+        elapsed_ms = start.elapsed_time(end)
+        times.append(elapsed_ms)
 
-    avg_time = sum(times) / len(times)
-    tokens_per_second = timing_tokens / (avg_time / 1000)  # Convert ms to seconds
+        latency = elapsed_ms / timing_tokens
+        throughput = timing_tokens / (elapsed_ms / 1000)
 
-    print(f"KV cache enabled: {use_cache}")
-    print(f"Latency (Time per token): {avg_time/timing_tokens:.2f} ms")
-    print(f"Throughput (Tokens per second): {tokens_per_second:.2f}")
+        print(f"Run {i + 1:2d}: Latency = {latency:.2f} ms/token, Throughput = {throughput:.2f} tokens/sec")
+
+    print("-" * 50)
+    times_np = np.array(times)
+    avg_time = times_np.mean()
+    std_dev = times_np.std()
+    min_time = times_np.min()
+    max_time = times_np.max()
+    median_time = np.median(times_np)
+
+    print(f"Summary (over {num_runs} runs):")
+    print(f"  Avg    Latency: {avg_time / timing_tokens:.2f} ms/token")
+    print(f"  Std    Latency: {std_dev / timing_tokens:.2f} ms/token")
+    print(f"  Min    Latency: {min_time / timing_tokens:.2f} ms/token")
+    print(f"  Max    Latency: {max_time / timing_tokens:.2f} ms/token")
+    print(f"  Median Latency: {median_time / timing_tokens:.2f} ms/token")
+    print(f"  Avg    Throughput: {timing_tokens / (avg_time / 1000):.2f} tokens/sec")
