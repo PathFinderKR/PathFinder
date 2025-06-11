@@ -85,7 +85,7 @@ class ModelConfig:
 
 @dataclass
 class GenerationConfig:
-    checkpoint_path: str = "checkpoints/GPT2-small/2025-06-06_00-49-15"#"checkpoints/GPT2-small/2025-06-04_00-16-24"#"checkpoints/GPT2-small/2025-06-06_00-49-15"
+    checkpoint_path: str = "checkpoints/PathFinder/2025-06-10_05-57-46"#"checkpoints/GPT2-small/2025-06-04_00-16-24"#"checkpoints/GPT2-small/2025-06-06_00-49-15"
     matmul_precision: Literal["highest", "high", "medium"] = "high"
     use_cache: bool = True
     max_new_tokens: int = 100
