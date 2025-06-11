@@ -17,8 +17,8 @@ class TrainConfig:
     run_name: str = field(default_factory=lambda: datetime.now().strftime('%Y-%m-%d_%H-%M-%S'))
 
     # Training
-    per_device_train_batch_size: int = 16
-    per_device_eval_batch_size: int = 32
+    per_device_train_batch_size: int = 8
+    per_device_eval_batch_size: int = 16
     gradient_accumulation_steps: int = 512 // per_device_train_batch_size  # 512 = global batch size
     num_train_epochs: int = 1
     learning_rate: float = 5e-4
@@ -83,9 +83,90 @@ class ModelConfig:
     norm_eps: float = 1e-5
     dropout: float = 0.1
 
+
+## GPT-2 Configuration
+gpt2_small_config = ModelConfig(
+    d_embed=768,
+    n_layers=12,
+    n_heads=12,
+    d_head=64,
+    d_ff=3072,
+    attn_bias=True,
+    mlp_bias=True
+)  # 124.48M
+gpt2_medium_config = ModelConfig(
+    d_embed=1024,
+    n_layers=24,
+    n_heads=16,
+    d_head=64,
+    d_ff=4096,
+    attn_bias=True,
+    mlp_bias=True
+)  # 354.87M
+gpt2_large_config = ModelConfig(
+    d_embed=1536,
+    n_layers=24,
+    n_heads=16,
+    d_head=96,
+    d_ff=6144,
+    attn_bias=True,
+    mlp_bias=True
+)  # 758.80M
+gpt2_xl_config = ModelConfig(
+    d_embed=2048,
+    n_layers=24,
+    n_heads=24,
+    d_head=128,
+    d_ff=8192,
+    attn_bias=True,
+    mlp_bias=True
+)  # 1.3B
+
+## GPT-2 MoE Configuration
+gpt2_moe_config = ModelConfig(
+    n_experts=4,
+    n_activated_experts=1
+)  # 294M (125M)
+#gpt2_router_free_moe_config = ModelConfig(
+#    n_experts=4,
+#    n_activated_experts=1,
+#    router_free=True
+#)  # 294M (125M)
+
+## nanoGPT Configuration
+nanogpt_config = ModelConfig(
+    d_embed=512,
+    n_layers=8,
+    n_heads=8,
+    d_head=64,
+    d_ff=2048
+)  # 26M
+nanogpt_moe_config = ModelConfig(
+    d_embed=128,
+    n_layers=4,
+    n_heads=4,
+    d_head=32,
+    d_ff=512,
+    n_experts=4,
+    n_activated_experts=1,
+)  # 2.5M (0.9M)
+
+## Custom Model Configuration
+pathfinder_config = ModelConfig(
+    d_embed=1024,
+    n_layers=16,
+    n_heads=16,
+    d_head=64,
+    rank=32,
+    d_ff=4096,
+    beta_min=1/2,
+    beta_max=4,
+    cross_layer_attention=True
+)  # 166.92M
+
 @dataclass
 class GenerationConfig:
-    checkpoint_path: str = "checkpoints/PathFinder/2025-06-10_05-57-46"#"checkpoints/GPT2-small/2025-06-04_00-16-24"#"checkpoints/GPT2-small/2025-06-06_00-49-15"
+    checkpoint_path: str = "checkpoints/PathFinder/2025-06-11_20-52-36"
     matmul_precision: Literal["highest", "high", "medium"] = "high"
     use_cache: bool = True
     max_new_tokens: int = 100

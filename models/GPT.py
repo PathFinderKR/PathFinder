@@ -354,7 +354,6 @@ class GPT(nn.Module, PyTorchModelHubMixin):
                         start_idx = 0
                 else:                                                          # Multi-Head Cross-Layer Latent Attention
                     start_idx = kv_cache.size(1)
-                    print(f"kv_cache.size(1): {kv_cache.size(1)}")
                     # kv_cache: [batch_size, seq_len, rank]
                     if kv_cache.size(1) > self.config.max_seq_len - 1:
                         # RESET KV CACHE
@@ -452,7 +451,7 @@ class GPT(nn.Module, PyTorchModelHubMixin):
         return idx
 
     def num_params(self):
-        return sum(p.numel() for p in self.parameters() if p.requires_grad) - self.lm_head.weight.numel()
+        return sum(p.numel() for p in self.parameters() if p.requires_grad)
 
     # TODO
     def num_active_params(self):
@@ -650,8 +649,8 @@ def main():
         d_head=64,
         rank=32,
         d_ff=4096,
-        # beta_min=1/2,
-        # beta_max=4,
+        beta_min=1 / 2,
+        beta_max=4,
         cross_layer_attention=True
     )
     model = GPT(model_config)

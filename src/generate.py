@@ -37,6 +37,7 @@ def main():
         raise FileNotFoundError(f"No checkpoint found at {checkpoint_path}")
     model = torch.compile(model)
     print(model)
+    print(f"Number of parameters: {model.num_params() / 1e6:.2f}M")
 
     # Speedometer
     speedometer(

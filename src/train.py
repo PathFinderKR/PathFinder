@@ -18,7 +18,11 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(PROJECT_ROOT)
 from src.utils import set_seed
 from models.GPT import GPT
-from src.config import TokenizerConfig, ModelConfig, DatasetConfig, TrainConfig
+from src.config import (TokenizerConfig, DatasetConfig, TrainConfig,
+                        gpt2_small_config, gpt2_medium_config, gpt2_large_config, gpt2_xl_config,
+                        gpt2_moe_config,
+                        nanogpt_config, nanogpt_moe_config,
+                        pathfinder_config)
 
 
 class Trainer:
@@ -140,89 +144,8 @@ class Trainer:
 def main():
     # Configuration
     tokenizer_config = TokenizerConfig()
-    #model_config = ModelConfig()
     dataset_config = DatasetConfig()
     train_config = TrainConfig()
-
-    ## GPT-2 Configuration
-    gpt2_small_config = ModelConfig(
-        d_embed=768,
-        n_layers=12,
-        n_heads=12,
-        d_head=64,
-        d_ff=3072,
-        attn_bias=True,
-        mlp_bias=True
-    )  # 125M
-    gpt2_medium_config = ModelConfig(
-        d_embed=1024,
-        n_layers=24,
-        n_heads=16,
-        d_head=64,
-        d_ff=4096,
-        attn_bias=True,
-        mlp_bias=True
-    )  # 350M
-    gpt2_large_config = ModelConfig(
-        d_embed=1536,
-        n_layers=24,
-        n_heads=16,
-        d_head=96,
-        d_ff=6144,
-        attn_bias=True,
-        mlp_bias=True
-    )  # 760M
-    gpt2_xl_config = ModelConfig(
-        d_embed=2048,
-        n_layers=24,
-        n_heads=24,
-        d_head=128,
-        d_ff=8192,
-        attn_bias=True,
-        mlp_bias=True
-    )  # 1.3B
-
-    ## GPT-2 MoE Configuration
-    gpt2_moe_config = ModelConfig(
-        n_experts=4,
-        n_activated_experts=1
-    )  # 294M (125M)
-    #gpt2_router_free_moe_config = ModelConfig(
-    #    n_experts=4,
-    #    n_activated_experts=1,
-    #    router_free=True
-    #)  # 294M (125M)
-
-    ## nanoGPT Configuration
-    nanogpt_config = ModelConfig(
-        d_embed=512,
-        n_layers=8,
-        n_heads=8,
-        d_head=64,
-        d_ff=2048
-    )  # 26M
-    nanogpt_moe_config = ModelConfig(
-        d_embed=128,
-        n_layers=4,
-        n_heads=4,
-        d_head=32,
-        d_ff=512,
-        n_experts=4,
-        n_activated_experts=1,
-    )  # 2.5M (0.9M)
-
-    ## Custom Model Configuration
-    pathfinder_config = ModelConfig(
-        d_embed=1024,
-        n_layers=16,
-        n_heads=16,
-        d_head=64,
-        rank=32,
-        d_ff=4096,
-        #beta_min=1/2,
-        #beta_max=4,
-        cross_layer_attention=True
-    ) # 117M
 
     # Device
     ## Distributed Data Parallel (DDP) setup
@@ -341,6 +264,7 @@ def main():
         model = GPT(pathfinder_config).to(device)
     else:
         raise ValueError(f"Unknown model name: {train_config.model_name}")
+
     model = torch.compile(model)
     if ddp:
         model = DDP(
@@ -366,7 +290,7 @@ def main():
         device=device,
         master_process=master_process
     )
-    trainer.train()
+    #trainer.train()
 
     # Save model
     if master_process:
