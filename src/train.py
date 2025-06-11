@@ -219,8 +219,8 @@ def main():
         d_head=64,
         rank=32,
         d_ff=4096,
-        #beta_min=1/2,
-        #beta_max=4,
+        beta_min=1/2,
+        beta_max=4,
         cross_layer_attention=True
     ) # 117M
 
@@ -355,7 +355,7 @@ def main():
         if ddp:
             print(f"Number of parameters: {model.module.num_params() / 1e6:.2f}M")
         else:
-            print(f"Number of parameters: {model.num_parameters() / 1e6:.2f}M")
+            print(f"Number of parameters: {model.num_params() / 1e6:.2f}M")
 
     # Training
     trainer = Trainer(
