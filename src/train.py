@@ -290,7 +290,7 @@ def main():
         device=device,
         master_process=master_process
     )
-    #trainer.train()
+    trainer.train()
 
     # Save model
     if master_process:
