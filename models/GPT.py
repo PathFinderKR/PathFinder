@@ -19,14 +19,9 @@ class MultiHeadAttention(nn.Module):
             # Multi Head Latent Attention
             assert config.rank < config.d_embed, "Rank must be less than embedding dimension"
             self.Wq = nn.Linear(config.d_embed, config.d_embed, bias=False)
-            if not config.cross_layer_attention:
-                self.Wkv_down = nn.Linear(config.d_embed, config.rank, bias=False)
-                self.Wk_up = nn.Linear(config.rank, config.d_embed, bias=False)
-                self.Wv_up = nn.Linear(config.rank, config.d_embed, bias=False)
-            else:
-                self.Wkv_down = nn.Linear(config.d_embed, config.d_embed, bias=False) if layer_idx ==0 else None
-                self.Wk_up = nn.Linear(config.d_embed, config.d_embed, bias=False) if layer_idx ==0 else None
-                self.Wv_up = nn.Linear(config.d_embed, config.d_embed, bias=False) if layer_idx ==0 else None
+            self.Wkv_down = nn.Linear(config.d_embed, config.rank, bias=False)
+            self.Wk_up = nn.Linear(config.rank, config.d_embed, bias=False)
+            self.Wv_up = nn.Linear(config.rank, config.d_embed, bias=False)
         self.out_proj = nn.Linear(config.d_embed, config.d_embed, bias=config.attn_bias)
         self.dropout = nn.Dropout(config.dropout)
 
