@@ -53,13 +53,13 @@ def main():
 
     # Generate
     while True:
-        print("=" * 50)
+        print("=" * 60)
         print("User prompt: ")
         user_prompt = input("> ")
         if user_prompt.lower() == "exit":
             break
         input_ids = tokenizer.encode(user_prompt, return_tensors="pt").to(device)
-        print("-" * 50)
+        print("-" * 60)
         print("🤖 Model Response:")
         output = model.generate(
             input_ids,
