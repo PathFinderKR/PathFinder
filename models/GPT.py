@@ -22,13 +22,13 @@ class MultiHeadAttention(nn.Module):
             self.Wkv_down = nn.Linear(config.d_embed, config.rank, bias=False)
             self.Wk_up = nn.Linear(config.rank, config.d_embed, bias=False)
             self.Wv_up = nn.Linear(config.rank, config.d_embed, bias=False)
+        self.scale = config.scale if config.scale is not None else config.d_head ** -0.5
         self.out_proj = nn.Linear(config.d_embed, config.d_embed, bias=config.attn_bias)
         self.dropout = nn.Dropout(config.dropout)
 
         if config.flash:
             assert hasattr(F, "scaled_dot_product_attention"), "Flash attention requires PyTorch 2.0 or higher"
         else:
-            self.scale = config.scale if config.scale is not None else config.d_head ** -0.5
             self.attn_dropout = nn.Dropout(config.dropout)
             self.register_buffer(
                 "mask",
@@ -52,8 +52,8 @@ class MultiHeadAttention(nn.Module):
             # ---------- KV cache  -------------------------------------------------------------------------------------
             if kv_cache is not None:
                 k_cache, v_cache = kv_cache                                         # kv_cache[0] -> k, kv_cache[1] -> v
-                k = torch.cat([k_cache, k], dim=1)                               # [batch_size, seq_len, d_embed]
-                v = torch.cat([v_cache, v], dim=1)                               # [batch_size, seq_len, d_embed]
+                k = torch.cat([k_cache, k], dim=1)                              # [batch_size, seq_len, d_embed]
+                v = torch.cat([v_cache, v], dim=1)                              # [batch_size, seq_len, d_embed]
             new_kv_cache = (k, v) if not self.training else None # Only store cache if generation
             kv_seq_len = k.size(1)
 
@@ -342,7 +342,7 @@ class GPT(nn.Module, PyTorchModelHubMixin):
             next_idx = torch.multinomial(probs, num_samples=1)                                         # [batch_size, 1]
 
             # ---------- Concatenate -----------------------------------------------------------------------------------
-            idx = torch.cat((idx, next_idx), dim=1)                                   # [batch_size, seq_len + 1]
+            idx = torch.cat((idx, next_idx), dim=1)                                  # [batch_size, seq_len + 1]
 
             # ---------- Streaming -------------------------------------------------------------------------------------
             if tokenizer is not None and idx.size(0) == 1:

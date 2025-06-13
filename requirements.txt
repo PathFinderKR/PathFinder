@@ -6,3 +6,4 @@ datasets
 numpy
 requests
 huggingface-hub
+triton
