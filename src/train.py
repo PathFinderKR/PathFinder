@@ -46,6 +46,49 @@ class Trainer:
         else:
             self.ctx = nullcontext()
 
+    def configure_optimizer(self):
+        """
+        Configure optimizer with different weight decay for different parameter groups.
+        - No weight decay for bias and LayerNorm parameters
+        """
+        attention_params = []
+        ffn_params = []
+        no_decay_params = []
+
+        for name, param in self.model.named_parameters():
+            if param.requires_grad:
+                if any(nd in name for nd in ['bias', 'norm', 'token_embedding', 'positional_encoding']):
+                    no_decay_params.append(param)
+
+                elif any(attn in name for attn in ['qkv_proj', 'out_proj', 'Wq', 'Wkv_down', 'Wk_up', 'Wv_up']):
+                    attention_params.append(param)
+
+                elif any(ffn in name for ffn in ['fc1', 'fc2']):
+                    ffn_params.append(param)
+
+                else:
+                    attention_params.append(param)
+
+        param_groups = [
+            {'params': attention_params, 'weight_decay': self.train_config.attn_decay if self.train_config.attn_decay is not None
+                                                         else self.train_config.weight_decay},
+            {'params': ffn_params,       'weight_decay': self.train_config.weight_decay},
+            {'params': no_decay_params,  'weight_decay': 0.0}
+        ]
+
+        # Remove empty groups
+        param_groups = [group for group in param_groups if group['params']]
+
+        optimizer = self.train_config.optim(
+            param_groups,
+            lr=self.train_config.learning_rate,
+            betas=self.train_config.betas,
+            eps=self.train_config.eps,
+            fused=True
+        )
+
+        return optimizer
+
     def train(self):
         if self.master_process:
             wandb.init(
@@ -59,14 +102,7 @@ class Trainer:
         total_steps = (len(self.train_loader) * self.train_config.num_train_epochs // self.train_config.gradient_accumulation_steps)
         warmup_steps = int(self.train_config.warmup_ratio * total_steps)
 
-        optimizer = self.train_config.optim(
-            self.model.parameters(),
-            lr=self.train_config.learning_rate,
-            weight_decay=self.train_config.weight_decay,
-            betas=self.train_config.betas,
-            eps=self.train_config.eps,
-            fused=True
-        )
+        optimizer = self.configure_optimizer()
         scheduler = get_cosine_schedule_with_warmup(
             optimizer,
             num_warmup_steps=warmup_steps,

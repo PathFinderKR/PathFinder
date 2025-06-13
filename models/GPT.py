@@ -28,7 +28,7 @@ class MultiHeadAttention(nn.Module):
         if config.flash:
             assert hasattr(F, "scaled_dot_product_attention"), "Flash attention requires PyTorch 2.0 or higher"
         else:
-            self.scale = config.d_head ** -0.5
+            self.scale = config.scale if config.scale is not None else config.d_head ** -0.5
             self.attn_dropout = nn.Dropout(config.dropout)
             self.register_buffer(
                 "mask",
@@ -66,6 +66,7 @@ class MultiHeadAttention(nn.Module):
             if self.config.flash:
                 attn_out = F.scaled_dot_product_attention(
                     q, k, v,
+                    scale=self.scale,
                     dropout_p=self.config.dropout if self.training else 0.0,
                     is_causal=True if seq_len > 1 else False
                 )                                                               # [batch_size, n_heads, seq_len, d_head]
@@ -103,6 +104,7 @@ class MultiHeadAttention(nn.Module):
                 if self.config.flash:
                     attn_out = F.scaled_dot_product_attention(
                         q, k, v,
+                        scale=self.scale,
                         dropout_p=self.config.dropout,
                         is_causal=True
                     )                                                           # [batch_size, n_heads, seq_len, d_head]
@@ -143,6 +145,7 @@ class MultiHeadAttention(nn.Module):
                 if self.config.flash:
                     attn = F.scaled_dot_product_attention(
                         q_latent, kv_latent, kv_latent,
+                        scale=self.scale,
                         is_causal=True if seq_len > 1 else False
                     )                                                             # [batch_size, n_heads, seq_len, rank]
                 else:
@@ -354,175 +357,20 @@ class GPT(nn.Module, PyTorchModelHubMixin):
     def num_params(self):
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
 
-    def get_flops(self, x):
-        B, T = x.size()
-        D = self.config.d_embed
-
-        # ---------- Accelerator Intensity in Nvidia -------------------------------------------------------------------
-        # FLOPs = 52.22 TFLOPs
-        # Memory Bandwidth = 736.6GB/s
-        # TensorCore Accelerator Intensity = 70.65
-
-        # ---------- Matrix multiplication FLOPs and Memory read/writes ------------------------------------------------
-        # x = [B, T, D], W = [D, F]
-        # 1. Read x to SRAM
-        # bytes = 2 x B X T X D = 2BTD
-        # 2. Read W to SRAM
-        # bytes = 2 x D x F = 2DF
-        # 3. Compute Y = x @ W
-        # FLOPS = 2 x B x T x D x F = 2BTDF
-        # 4. Write Y to HBM
-        # bytes = 2BTF
-        # Arithmetic Intensity
-        # AI = 2BTDF / (2BTD + 2DF + 2BTF) = 4BTD / (5BT + 4D)
-        #    = BT
-
-        # ---------- Attention FLOPs and Memory read/writes ------------------------------------------------------------
-        # 1. Read x from HBM
-        # bytes =
-        # 2. Read Wq Wk Wv from HBM
-        # bytes =
-        # 3. Compute
-        #
-        #
-
-        ########## Multi Head Attention ################################################################################
-        if self.config.rank is None:
-            ## Prefill
-            ######### Flash Attention ##########
-            # 1. Read Q, K, V from HBM
-            # bytes = 3 x (2 x B x T x D) = 6BTD
-            # 2. Compute Q @ K
-            # FLOPS = 2 x B x T x T x D = 2BT^2D
-            # 3. Compute A @ V
-            # FLOPS = 2 × B × T × T × D = 2BT^2D
-            # 4. Write attn_out
-            # bytes = 2 x B x T x D = 2BTD
-            ####################################
-            # attn bytes = 6BTD + 2BTD = 8BTD
-            # attn FLOPS = 2BT^2D + 2BT^2D = 4BT^2D
-            # attn AI = 4BT^2D / 8BTD = T/2
-            #         = T
-            attn_prefill_flops = 4 * B * T * T * D
-            attn_prefill_ai = T / 2
-
-            ## Decoding
-            ######### Flash Attention ##########
-            # 1. Read Q, K, V from HBM
-            # bytes = 2 x B x 1 x D + 2 x (2 x B x S x D) = 2BD + 4BSD
-            # 2. Compute Q @ K
-            # FLOPS = 2 x B x 1 x S x D = 2BSD
-            # 3. Compute A @ V
-            # FLOPS = 2 × B × S × 1 × D = 2BSD
-            # 4. Write attn_out
-            # bytes = 2 x B x 1 x D = 2BD
-            ####################################
-            # attn bytes = 2BD + 4BSD + 2BD = 4BD(1 + S)
-            # attn FLOPS = 2BSD + 2BSD = 4BSD
-            # attn AI = 4BSD / 4BD(1 + S) = S / (1 + S) (ignore 1)
-            #         = 1
-            attn_decoding_flops = 4 * B * T * D
-            attn_decoding_ai = T / (1 + T)
-            # Why so low ai?
-            # FLOPS decreased by T, bytes remain the same
-
-        ########## Multi Head Latent Attention #########################################################################
-        else:
-            R = self.config.rank
-            ## Prefill
-            # 1. Read KV_latent from HBM
-            # bytes = 2 x (2 x B x T x R) = 4BTR
-            # 2. Read Wkv_up from HBM
-            # bytes = 2 x R x 2D = 4RD
-            # 3. Compute kv_latent @ Wkv_up
-            # FLOPS = 2 x B x T x R x 2D = 4BTRD
-            # 4. Write k, v to HBM
-            # bytes = 2 x (2 x B x T x D) = 4BTD
-            ######### Flash Attention ##########
-            # 1. Read Q, K, V from HBM
-            # bytes = 3 x (2 x B x T x D) = 6BTD
-            # 2. Compute Q @ K
-            # FLOPS = 2 x B x T x T x D = 2BT^2D
-            # 3. Compute A @ V
-            # FLOPS = 2 × B × T × T × D = 2BT^2D
-            # 4. Write y
-            # bytes = 2 x B x T x D = 2BTD
-            ####################################
-            # attn bytes = 4BTR + 4RD + 4BTD + 6BTD + 2BTD = 4(RD + BTR + 3BTD)
-            # attn FLOPS = 4BTRD + 2BT^2D + 2BT^2D = 4BTD(R + T)
-            # attn AI = 4BTD(R + T) / 4(RD + BTR + 3BTD) = BTD(R + T) / RD + BTR + 3BTD
-            #         =
-            attn_prefill_flops = 4 * B * T * D * (R + T)
-            attn_prefill_ai = T / 2
-
-            ## Decoding
-            # 1. KV_latent from HBM
-            # bytes = 2 x (2 x B x S x R) = 4BSR
-            # 2. Read Wkv_up from HBM
-            # bytes = 2 x R x 2D = 4RD
-            # 3. Compute kv_latent @ Wkv_up
-            # FLOPS = 2 x B x S x R x 2D = 4BSRD
-            # 4. Write k, v to HBM
-            # bytes = 2 x (2 x B x S x D) = 4BSD
-            ######### Flash Attention ##########
-            # 1. Read Q_latent, KV_latent from HBM
-            # bytes = 2 x B x S x R x D / d + 2 x B x S x R = 2BSR(D/d + 1)
-            # 2. Compute Q_latent @ K_latent
-            # FLOPS = 2 x B x 1 x S x R = 2BSR
-            # 3. Compute A @ KV_latent
-            # FLOPS = 2 x B x S x 1 x R = 2BSR
-            # 4. Write y
-            # bytes = 2 x B x 1 X R = 2BR
-            ####################################
-            # 5. Compute
-            # attn bytes =
-            # attn FLOPS =
-            # attn AI = 2S / (1 + S(D/d + 1))
-            #         =
-            attn_decoding_flops = 4 * B * T * D
-            attn_decoding_ai = T / (1 + T)
-        ################################################################################################################
-
-        ## KV cache
-        ##### MultiHeadAttention ###########
-        # size = 2 x (2 x B x S x D) = 4BSD
-        # AI = 1
-        ##### GroupedQueryAttention ########
-        # size = 2 x (2 x B x S x D / n_groups) = 4BSD / n_groups
-        # AI = G (group_size)
-        ##### MultiQueryAttention ##########
-        # size = 2 x (2 x B X S x d) = 4BSD / n_heads
-        # AI = n_heads
-        ##### MultiHeadLatentAttention #####
-        # size = 2 x (B x S x R) = 2BSR = 4BSD / (2D/R)
-        # AI = 2D/R
-
-        # ---------- FeedForward FLOPs and Memory read/writes ----------------------------------------------------------
-        # 1. Read x from HBM
-        # bytes = 2 x B x T x D = 2BTD
-        # 2. Read Wup, Wdown from HBM
-        # bytes = 2 x (2 x D x 4D) = 16D^2
-        # 3. Compute x @ Wup
-        # FLOPS = 2 x B x T x D x 4D = 8BTD^2
-        # 4. Compute x @ Wdown
-        # FLOPS = 2 x B x T x 4D x D = 8BTD^2
-        # 5. Write x to HBM
-        # bytes = 2 x B x T x D = 2BTD
-        ####################################
-        # FF bytes = 2BTD + 16D^2 + 2BTD = 4D(BT + 4D)
-        # FF FLOPS = 8BTD^2 + 8BTD^2 = 16BTD^2
-        # FF AI = 16BTD^2 / 4D(BT + 4D) = 4BTD / (BT + 4D) (ignore 2BT)
-        #       = BT
-        feedforward_flops = 16 * B * T * D * D
-        feedforward_ai = 4 * B * T * D / (B * T + 4 * D)
-
-        flops = {
-            'attn_prefill_flops': attn_prefill_flops, 'attn_prefill_ai': attn_prefill_ai,
-            'attn_decoding_flops': attn_decoding_flops, 'attn_decoding_ai': attn_decoding_ai,
-            'feedforward_flops': feedforward_flops, 'feedforward_ai': feedforward_ai
-        }
-
-        return flops
+    def estimate_mfu(self, fwdbwd_per_iter, dt):
+        """ estimate model flops utilization (MFU) in units of A100 bfloat16 peak FLOPS """
+        # first estimate the number of flops we do per iteration.
+        # see PaLM paper Appendix B as ref: https://arxiv.org/abs/2204.02311
+        N = self.num_params()
+        L, H, Q, T = cfg.n_layer, cfg.n_head, cfg.n_embd // cfg.n_head, cfg.block_size
+        flops_per_token = 6 * N + 12 * L * H * Q * T
+        flops_per_fwdbwd = flops_per_token * T
+        flops_per_iter = flops_per_fwdbwd * fwdbwd_per_iter
+        # express our flops throughput as ratio of A100 bfloat16 peak flops
+        flops_achieved = flops_per_iter * (1.0 / dt)  # per second
+        flops_promised = 312e12  # A100 GPU bfloat16 peak flops is 312 TFLOPS
+        mfu = flops_achieved / flops_promised
+        return mfu
 
 
 def main():
@@ -539,9 +387,6 @@ def main():
     model = GPT(model_config)
     print(model)
     print(f"Number of parameters: {model.num_params() / 1e6:.2f}M")
-
-    #sample_input = torch.randint(0, model_config.vocab_size, (1, 1))
-    #print(f"Attention Prefill
 
 
 if __name__ == "__main__":
