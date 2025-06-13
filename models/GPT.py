@@ -2,8 +2,11 @@ import math
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.profiler import profile, record_function, ProfilerActivity
 from huggingface_hub import PyTorchModelHubMixin
 from src.config import ModelConfig
+from src.utils import set_seed
+#from models.flash import flash_attn_decode
 
 
 class MultiHeadAttention(nn.Module):
@@ -64,18 +67,26 @@ class MultiHeadAttention(nn.Module):
 
             # ---------- Causal self-attention -------------------------------------------------------------------------
             if self.config.flash:
-                attn_out = F.scaled_dot_product_attention(
-                    q, k, v,
-                    scale=self.scale,
-                    dropout_p=self.config.dropout if self.training else 0.0,
-                    is_causal=True if seq_len > 1 else False
-                )                                                               # [batch_size, n_heads, seq_len, d_head]
+                if q.size(2) != 1:  # Prefill
+                    attn_out = F.scaled_dot_product_attention(
+                        q, k, v,
+                        scale=self.scale,
+                        dropout_p=self.config.dropout,
+                        is_causal=True
+                    )                                                           # [batch_size, n_heads, seq_len, d_head]
+                else:               # Decode
+                    attn_out = flash_attn_decode(
+                        q,                                                            # [batch_size, n_heads, 1, d_head]
+                        k, v,                                                   # [batch_size, n_heads, seq_len, d_head]
+                        scale=self.scale
+                    )                                                                 # [batch_size, n_heads, 1, d_head]
+
             else:
                 attn_scores = (q @ k.transpose(-2, -1)) * self.scale           # [batch_size, n_heads, seq_len, seq_len]
                 attn_scores = attn_scores.masked_fill(self.mask[:, :, :seq_len, :kv_seq_len] == 0, float('-inf'))
-                attn_scores = F.softmax(attn_scores, dim=-1)
-                attn_scores = self.attn_dropout(attn_scores)
-                attn_out = attn_scores @ v                                      # [batch_size, n_heads, seq_len, d_head]
+                attn = F.softmax(attn_scores, dim=-1)
+                attn = self.attn_dropout(attn)
+                attn_out = attn @ v                                             # [batch_size, n_heads, seq_len, d_head]
 
             # ---------- Concatenation ---------------------------------------------------------------------------------
             attn_out = attn_out.transpose(1, 2).contiguous().view(batch_size, seq_len, self.config.d_embed)
@@ -357,36 +368,37 @@ class GPT(nn.Module, PyTorchModelHubMixin):
     def num_params(self):
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
 
-    def estimate_mfu(self, fwdbwd_per_iter, dt):
-        """ estimate model flops utilization (MFU) in units of A100 bfloat16 peak FLOPS """
-        # first estimate the number of flops we do per iteration.
-        # see PaLM paper Appendix B as ref: https://arxiv.org/abs/2204.02311
-        N = self.num_params()
-        L, H, Q, T = cfg.n_layer, cfg.n_head, cfg.n_embd // cfg.n_head, cfg.block_size
-        flops_per_token = 6 * N + 12 * L * H * Q * T
-        flops_per_fwdbwd = flops_per_token * T
-        flops_per_iter = flops_per_fwdbwd * fwdbwd_per_iter
-        # express our flops throughput as ratio of A100 bfloat16 peak flops
-        flops_achieved = flops_per_iter * (1.0 / dt)  # per second
-        flops_promised = 312e12  # A100 GPU bfloat16 peak flops is 312 TFLOPS
-        mfu = flops_achieved / flops_promised
-        return mfu
-
 
 def main():
+    # Device
+    device = torch.device("cuda")
+    print(f"Device: {torch.cuda.get_device_name(device)}")
+    torch.set_float32_matmul_precision("high")
+
+    # Reproducibility
+    set_seed(42)
+
     model_config = ModelConfig(
-        d_embed=1024,
-        n_layers=10,
-        n_heads=16,
+        d_embed=768,
+        n_layers=12,
+        n_heads=12,
         d_head=64,
-        rank=32,
-        d_ff=-1,
-        beta_min=1 / 2,
-        beta_max=4
+        d_ff=3072,
+        attn_bias=True,
+        mlp_bias=True,
+        flash=True
     )
-    model = GPT(model_config)
+    model = GPT(model_config).to(device)
+    model = torch.compile(model)
     print(model)
     print(f"Number of parameters: {model.num_params() / 1e6:.2f}M")
+
+    # Profiling
+    input_ids = torch.randint(0, 50257, (1, 1024), device=device)
+    with profile(activities=[ProfilerActivity.CUDA], record_shapes=True) as prof:
+        with record_function("model_inference"):
+            model(input_ids)
+    print(prof.key_averages(group_by_input_shape=True).table(sort_by="cuda_time_total", row_limit=20))
 
 
 if __name__ == "__main__":

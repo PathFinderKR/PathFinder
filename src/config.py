@@ -93,7 +93,7 @@ gpt2_small_config = ModelConfig(
     d_head=64,
     d_ff=3072,
     attn_bias=True,
-    mlp_bias=True
+    mlp_bias=True,
 )  # 124.48M
 gpt2_medium_config = ModelConfig(
     d_embed=1024,
