@@ -60,7 +60,6 @@ class ModelConfig:
     attn_bias: bool = False
     n_kv_heads: Optional[int] = None
     rank: Optional[int] = None
-    cross_layer_attention: bool = False
     ## Mixture of Attention Heads
     n_activated_heads: Optional[int] = None
     n_shared_heads: Optional[int] = None
@@ -160,15 +159,17 @@ pathfinder_config = ModelConfig(
     rank=32,
     d_ff=-1,
     beta_min=1/2,
-    beta_max=4,
-    cross_layer_attention=True
+    beta_max=4
 )  # 123.84M
 
 @dataclass
 class GenerationConfig:
-    checkpoint_path: str = "checkpoints/GPT2-small/2025-06-11_21-24-06"
+    checkpoint_path: str = "checkpoints/PathFinder/2025-06-09_21-14-00"
+    model_id: str = "GPT2-small-2025-06-09_21-14-00"
     matmul_precision: Literal["highest", "high", "medium"] = "high"
+    seed: int = 101
     use_cache: bool = True
     max_new_tokens: int = 100
     temperature: float = 1.0
     top_k: int = 50
+    speedometer: bool = False

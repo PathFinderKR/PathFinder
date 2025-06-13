@@ -20,7 +20,7 @@ def main():
     print(f"MatMul Precision: {generation_config.matmul_precision}")
 
     # Reproducibility
-    set_seed(42)
+    set_seed(generation_config.seed)
 
     # Tokenizer
     tokenizer = AutoTokenizer.from_pretrained(
@@ -30,26 +30,40 @@ def main():
     print(f"Tokenizer: {tokenizer}")
 
     # Model
-    checkpoint_path = os.path.join(PROJECT_ROOT, generation_config.checkpoint_path)
-    if os.path.exists(checkpoint_path):
-        model = GPT.from_pretrained(checkpoint_path).to(device)
+    if generation_config.model_id is not None:
+        # Download from hub
+        from huggingface_hub import snapshot_download
+        local_dir = os.path.join(PROJECT_ROOT, "checkpoints", generation_config.model_id)
+        snapshot_download(
+            repo_id=f"PathFinderKR/{generation_config.model_id}",
+            local_dir=local_dir,
+            use_auth_token=os.environ.get("HUGGINGFACE_TOKEN")
+        )
+        model = GPT.from_pretrained(local_dir).to(device)
     else:
-        raise FileNotFoundError(f"No checkpoint found at {checkpoint_path}")
+        # Load from local directory
+        checkpoint_path = os.path.join(PROJECT_ROOT, generation_config.checkpoint_path)
+        if os.path.exists(checkpoint_path):
+            model = GPT.from_pretrained(checkpoint_path).to(device)
+        else:
+            raise FileNotFoundError(f"No checkpoint found at {checkpoint_path}")
+
     model = torch.compile(model)
     print(model)
     print(f"Number of parameters: {model.num_params() / 1e6:.2f}M")
 
     # Speedometer
-    speedometer(
-        model=model,
-        input_ids=tokenizer.encode("a", return_tensors="pt").to(device),
-        use_cache=False
-    )
-    speedometer(
-        model=model,
-        input_ids=tokenizer.encode("a", return_tensors="pt").to(device),
-        use_cache=True
-    )
+    if generation_config.speedometer:
+        speedometer(
+            model=model,
+            input_ids=tokenizer.encode("a", return_tensors="pt").to(device),
+            use_cache=False
+        )
+        speedometer(
+            model=model,
+            input_ids=tokenizer.encode("a", return_tensors="pt").to(device),
+            use_cache=True
+        )
 
     # Generate
     while True:
