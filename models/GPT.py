@@ -5,7 +5,6 @@ import torch.nn.functional as F
 from torch.profiler import profile, record_function, ProfilerActivity
 from huggingface_hub import PyTorchModelHubMixin
 from src.config import ModelConfig
-from src.utils import set_seed
 #from models.flash import flash_attn_decode
 
 
@@ -57,33 +56,43 @@ class MultiHeadAttention(nn.Module):
                 k_cache, v_cache = kv_cache                                         # kv_cache[0] -> k, kv_cache[1] -> v
                 k = torch.cat([k_cache, k], dim=1)                              # [batch_size, seq_len, d_embed]
                 v = torch.cat([v_cache, v], dim=1)                              # [batch_size, seq_len, d_embed]
-            new_kv_cache = (k, v) if not self.training else None # Only store cache if generation
+            new_kv_cache = (k, v) if not self.training else None  # Only store cache if generation
             kv_seq_len = k.size(1)
 
+            # ---------- Causal self-attention -------------------------------------------------------------------------
             q = q.view(batch_size, seq_len, self.config.n_heads, self.config.d_head).transpose(1, 2)
             k = k.view(batch_size, kv_seq_len, self.config.n_heads, self.config.d_head).transpose(1, 2)
             v = v.view(batch_size, kv_seq_len, self.config.n_heads, self.config.d_head).transpose(1, 2)
                                                                                 # [batch_size, n_heads, seq_len, d_head]
-
-            # ---------- Causal self-attention -------------------------------------------------------------------------
             if self.config.flash:
-                #if q.size(2) != 1:  # Prefill
+                if kv_cache is None:  # -----Prefill
                     attn_out = F.scaled_dot_product_attention(
                         q, k, v,
                         scale=self.scale,
                         dropout_p=self.config.dropout,
                         is_causal=True
                     )                                                           # [batch_size, n_heads, seq_len, d_head]
-                #else:               # Decode
-                #    attn_out = flash_attn_decode(
-                #        q,                                                            # [batch_size, n_heads, 1, d_head]
-                #        k, v,                                                   # [batch_size, n_heads, seq_len, d_head]
-                #        scale=self.scale
-                #    )                                                                 # [batch_size, n_heads, 1, d_head]
+                else:                  # -----Decode
+                    attn_out = F.scaled_dot_product_attention(
+                        q, k, v,
+                        scale=self.scale,
+                        dropout_p=self.config.dropout,
+                        is_causal=False
+                    )  # [batch_size, n_heads, seq_len, d_head]
+                    #attn_out = flash_attn_decode(
+                    #    q,                                                            # [batch_size, n_heads, 1, d_head]
+                    #    k, v,                                                   # [batch_size, n_heads, seq_len, d_head]
+                    #    scale=self.scale,
+                    #    pred_max=
+                    #)                                                                 # [batch_size, n_heads, 1, d_head]
 
             else:
                 attn_scores = (q @ k.transpose(-2, -1)) * self.scale           # [batch_size, n_heads, seq_len, seq_len]
-                attn_scores = attn_scores.masked_fill(self.mask[:, :, :seq_len, :kv_seq_len] == 0, float('-inf'))
+                if kv_cache is None:  # -----Prefill
+                    mask_slice = self.mask[:, :, :seq_len, :seq_len]
+                else:                 # -----Decode
+                    mask_slice = self.mask[:, :, kv_seq_len - 1:kv_seq_len, :kv_seq_len]
+                attn_scores = attn_scores.masked_fill(mask_slice == 0, float('-inf'))
                 attn = F.softmax(attn_scores, dim=-1)
                 attn = self.attn_dropout(attn)
                 attn_out = attn @ v                                             # [batch_size, n_heads, seq_len, d_head]
@@ -238,7 +247,7 @@ class GPT(nn.Module, PyTorchModelHubMixin):
         self.lm_head.weight = self.token_embedding.weight
 
         self.apply(self._init_weights)
-
+    # TODO
     # Kaiming initialization
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
@@ -365,18 +374,23 @@ class GPT(nn.Module, PyTorchModelHubMixin):
 
         return idx
 
-    def num_params(self):
+    def get_num_params(self):
         return sum(p.numel() for p in self.parameters() if p.requires_grad)
 
 
-def main():
+def test_model_profiling():
+    """
+    Test function to profile the GPT model performance.
+    """
+    import pytest
+
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+
     # Device
     device = torch.device("cuda")
-    print(f"Device: {torch.cuda.get_device_name(device)}")
     torch.set_float32_matmul_precision("high")
-
-    # Reproducibility
-    set_seed(42)
+    print(f"Device: {torch.cuda.get_device_name(device)}")
 
     model_config = ModelConfig(
         d_embed=768,
@@ -391,14 +405,18 @@ def main():
     model = GPT(model_config).to(device)
     model = torch.compile(model)
     print(model)
-    print(f"Number of parameters: {model.num_params() / 1e6:.2f}M")
+    print(f"Number of parameters: {model.get_num_params() / 1e6:.2f}M")
 
-    # Profiling
-    input_ids = torch.randint(0, 50257, (1, 1024), device=device)
+    # Profiling test
+    input_ids = torch.randint(0, model_config.vocab_size, (1, model_config.max_seq_len), device=device)
     with profile(activities=[ProfilerActivity.CUDA], record_shapes=True) as prof:
         with record_function("model_inference"):
             model(input_ids)
     print(prof.key_averages(group_by_input_shape=True).table(sort_by="cuda_time_total", row_limit=20))
+
+
+def main():
+    test_model_profiling()
 
 
 if __name__ == "__main__":

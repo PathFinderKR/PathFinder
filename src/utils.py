@@ -4,7 +4,6 @@ import numpy as np
 from typing import Tuple
 import torch
 import torch.nn as nn
-#import transformer_engine.pytorch as te
 
 
 def set_seed(seed: int):
