@@ -25,9 +25,9 @@ class MultiHeadAttention(nn.Module):
             self.Wk_up = nn.Linear(config.rank, config.d_embed, bias=False)
             self.Wv_up = nn.Linear(config.rank, config.d_embed, bias=False)
         if config.attn_temperature is None:
-            self.scale = 1 / (config.d_head ** 0.5)
+            self.scale = 1 / math.sqrt(config.d_head)
         else:
-            self.scale = 1 / (config.attn_temperature * (config.d_head ** 0.5))
+            self.scale = 1 / (config.attn_temperature * math.sqrt(config.d_head))
         self.out_proj = nn.Linear(config.d_embed, config.d_embed, bias=config.attn_bias)
         self.dropout = nn.Dropout(config.dropout)
 
@@ -244,19 +244,15 @@ class GPT(nn.Module, PyTorchModelHubMixin):
 
         self.apply(self._init_weights)
 
-    # Kaiming initialization
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
             fan_in, _ = nn.init._calculate_fan_in_and_fan_out(module.weight)
-            torch.nn.init.normal_(module.weight, mean=0, std=math.sqrt(2 / fan_in))
-            if module.bias is not None:
-                fan_in, _ = nn.init._calculate_fan_in_and_fan_out(module.weight)
-                bound = 1 / math.sqrt(fan_in)
-                torch.nn.init.uniform_(module.bias, -bound, bound)
-
-        elif isinstance(module, nn.Embedding):
-            fan_in, _ = nn.init._calculate_fan_in_and_fan_out(module.weight)
             nn.init.normal_(module.weight, mean=0, std=math.sqrt(2 / fan_in))
+            if module.bias is not None:
+                bound = 1 / math.sqrt(fan_in)
+                nn.init.uniform_(module.bias, -bound, bound)
+        elif isinstance(module, nn.Embedding):
+            nn.init.normal_(module.weight, mean=0, std=0.02)
 
     def forward(self, input_ids, target_ids=None, kv_cache=None):
         # Prefill

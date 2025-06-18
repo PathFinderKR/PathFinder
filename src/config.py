@@ -23,7 +23,7 @@ class TrainConfig:
     num_train_epochs: int = 1
     learning_rate: float = 6e-4
     weight_decay: float = 0.1
-    attn_decay: float = 0.5
+    attn_decay: float = 0.1
     optim: torch.optim.Optimizer = torch.optim.AdamW
     betas: tuple[float, float] = (0.9, 0.95)
     eps: float = 1e-8
@@ -33,7 +33,7 @@ class TrainConfig:
     seed: int = 42
     ## Precision
     mixed_precision: bool = True
-    matmul_precision: Literal["highest", "high", "medium"] = "high"
+    matmul_precision: Literal["highest", "high", "medium"] = "medium"
 
 @dataclass
 class DatasetConfig:
@@ -58,7 +58,7 @@ class ModelConfig:
     flash: bool = True
     n_heads: int = 12
     d_head: int = 64
-    attn_temperature: float = 2
+    attn_temperature: float = None
     attn_bias: bool = False
     n_kv_heads: Optional[int] = None
     rank: Optional[int] = None
@@ -82,7 +82,7 @@ class ModelConfig:
     n_shared_experts: Optional[int] = None
 
     norm_eps: float = 1e-5
-    dropout: float = 0.1
+    dropout: float = 0.01
 
 
 ## GPT-2 Configuration
@@ -92,8 +92,8 @@ gpt2_small_config = ModelConfig(
     n_heads=12,
     d_head=64,
     d_ff=3072,
-    attn_bias=False,
-    mlp_bias=True,
+    attn_bias=True,
+    mlp_bias=True
 )  # 124.48M
 gpt2_medium_config = ModelConfig(
     d_embed=1024,
