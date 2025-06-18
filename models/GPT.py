@@ -89,9 +89,9 @@ class MultiHeadAttention(nn.Module):
                 else:                 # -----Decode
                     mask_slice = self.mask[:, :, kv_seq_len - 1:kv_seq_len, :kv_seq_len]
                 attn_scores = attn_scores.masked_fill(mask_slice == 0, float('-inf'))
-                attn = F.softmax(attn_scores, dim=-1)
-                attn = self.attn_dropout(attn)
-                attn_out = attn @ v                                             # [batch_size, n_heads, seq_len, d_head]
+                attn_prob = F.softmax(attn_scores, dim=-1)
+                attn_prob = self.attn_dropout(attn_prob)
+                attn_out = attn_prob @ v                                        # [batch_size, n_heads, seq_len, d_head]
 
             # ---------- Concatenation ---------------------------------------------------------------------------------
             attn_out = attn_out.transpose(1, 2).contiguous().view(batch_size, seq_len, self.config.d_embed)
