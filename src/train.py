@@ -14,6 +14,9 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 from transformers import AutoTokenizer, get_cosine_schedule_with_warmup
 from datasets import load_from_disk
 import wandb
+
+from notebooks.gpt import model_config
+
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(PROJECT_ROOT)
 from src.utils import set_seed
@@ -308,7 +311,7 @@ def main():
             model,
             device_ids=[local_rank],
             output_device=local_rank,
-            find_unused_parameters=True
+            find_unused_parameters=True if model_config.n_experts > 0 else False
         )
 
     if master_process:
