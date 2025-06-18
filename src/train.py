@@ -225,7 +225,8 @@ def main():
         use_fast=True
     )
     tokenizer.pad_token = tokenizer.eos_token
-    print(f"Tokenizer: {tokenizer}")
+    if master_process:
+        print(f"Tokenizer: {tokenizer}")
 
     # Dataset
     dataset_path = os.path.join(PROJECT_ROOT, dataset_config.local_dir)
@@ -313,9 +314,9 @@ def main():
     if master_process:
         print(model)
         if ddp:
-            print(f"Number of parameters: {model.module.num_params() / 1e6:.2f}M")
+            print(f"Number of parameters: {model.module.get_num_params() / 1e6:.2f}M")
         else:
-            print(f"Number of parameters: {model.num_params() / 1e6:.2f}M")
+            print(f"Number of parameters: {model.get_num_params() / 1e6:.2f}M")
 
     # Training
     trainer = Trainer(
