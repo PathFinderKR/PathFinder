@@ -4,6 +4,8 @@ tqdm
 transformers
 datasets
 numpy
-requests
 huggingface-hub
-triton
+matplotlib
+pytest
+seaborn
+scipy

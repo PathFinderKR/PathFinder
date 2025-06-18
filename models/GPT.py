@@ -72,22 +72,16 @@ class MultiHeadAttention(nn.Module):
                     attn_out = F.scaled_dot_product_attention(
                         q, k, v,
                         scale=self.scale,
-                        dropout_p=self.config.dropout,
-                        is_causal=True
+                        dropout_p=self.config.dropout if self.training else 0,
+                        is_causal=True if seq_len > 1 else False
                     )                                                           # [batch_size, n_heads, seq_len, d_head]
                 else:                  # -----Decode
                     attn_out = F.scaled_dot_product_attention(
-                        q, k, v,
+                        q,
+                        k, v,
                         scale=self.scale,
                         is_causal=False
-                    )  # [batch_size, n_heads, seq_len, d_head]
-                    #attn_out = flash_attn_decode(
-                    #    q,                                                            # [batch_size, n_heads, 1, d_head]
-                    #    k, v,                                                   # [batch_size, n_heads, seq_len, d_head]
-                    #    scale=self.scale,
-                    #    pred_max=
-                    #)                                                                 # [batch_size, n_heads, 1, d_head]
-
+                    )                                                           # [batch_size, n_heads, seq_len, d_head]
             else:
                 attn_scores = (q @ k.transpose(-2, -1)) * self.scale           # [batch_size, n_heads, seq_len, seq_len]
                 if kv_cache is None:  # -----Prefill
