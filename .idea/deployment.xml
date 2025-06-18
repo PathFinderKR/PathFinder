@@ -2,7 +2,7 @@
 <project version="4">
   <component name="PublishConfigData" autoUpload="Always" serverName="taurus-docker" remoteFilesAllowedToDisappearOnAutoupload="false">
     <serverData>
-      <paths name="AMD-7700 (2)">
+      <paths name="AMD-7700">
         <serverdata>
           <mappings>
             <mapping deploy="/home/pathfinder/projects/PathFinder" local="$PROJECT_DIR$" />

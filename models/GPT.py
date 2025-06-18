@@ -247,17 +247,20 @@ class GPT(nn.Module, PyTorchModelHubMixin):
         self.lm_head.weight = self.token_embedding.weight
 
         self.apply(self._init_weights)
-    # TODO
+
     # Kaiming initialization
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
-            torch.nn.init.kaiming_uniform_(module.weight, a=math.sqrt(5))
+            fan_in, _ = nn.init._calculate_fan_in_and_fan_out(module.weight)
+            torch.nn.init.normal_(module.weight, mean=0, std=math.sqrt(2 / fan_in))
             if module.bias is not None:
                 fan_in, _ = nn.init._calculate_fan_in_and_fan_out(module.weight)
                 bound = 1 / math.sqrt(fan_in)
                 torch.nn.init.uniform_(module.bias, -bound, bound)
+
         elif isinstance(module, nn.Embedding):
-            torch.nn.init.kaiming_uniform_(module.weight, a=math.sqrt(5))
+            fan_in, _ = nn.init._calculate_fan_in_and_fan_out(module.weight)
+            nn.init.normal_(module.weight, mean=0, std=math.sqrt(2 / fan_in))
 
     def forward(self, input_ids, target_ids=None, kv_cache=None):
         # Prefill
