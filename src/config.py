@@ -13,15 +13,15 @@ class TrainConfig:
         "GPT2-MoE", "GPT2-MoE-router-free",                    # Mixture of Experts
         "nanoGPT", "nanoGPT-MoE",                              # nano versions
         "PathFinder", "PathFinder-nano",                       # custom models
-    ] = "PathFinder"
+    ] = "GPT2-small"
     run_name: str = field(default_factory=lambda: datetime.now().strftime('%Y-%m-%d_%H-%M-%S'))
 
     # Training
-    per_device_train_batch_size: int = 8
-    per_device_eval_batch_size: int = 16
+    per_device_train_batch_size: int = 16
+    per_device_eval_batch_size: int = 32
     gradient_accumulation_steps: int = 512 // per_device_train_batch_size  # 512 = global batch size
     num_train_epochs: int = 1
-    learning_rate: float = 5e-4
+    learning_rate: float = 6e-4
     weight_decay: float = 0.1
     attn_decay: float = 0.5
     optim: torch.optim.Optimizer = torch.optim.AdamW
@@ -92,7 +92,7 @@ gpt2_small_config = ModelConfig(
     n_heads=12,
     d_head=64,
     d_ff=3072,
-    attn_bias=True,
+    attn_bias=False,
     mlp_bias=True,
 )  # 124.48M
 gpt2_medium_config = ModelConfig(
