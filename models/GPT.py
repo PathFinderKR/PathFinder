@@ -24,7 +24,10 @@ class MultiHeadAttention(nn.Module):
             self.Wkv_down = nn.Linear(config.d_embed, config.rank, bias=False)
             self.Wk_up = nn.Linear(config.rank, config.d_embed, bias=False)
             self.Wv_up = nn.Linear(config.rank, config.d_embed, bias=False)
-        self.scale = config.scale if config.scale is not None else config.d_head ** -0.5
+        if config.attn_temperature is None:
+            self.scale = 1 / (config.d_head ** 0.5)
+        else:
+            self.scale = 1 / (config.attn_temperature * (config.d_head ** 0.5))
         self.out_proj = nn.Linear(config.d_embed, config.d_embed, bias=config.attn_bias)
         self.dropout = nn.Dropout(config.dropout)
 
@@ -76,7 +79,6 @@ class MultiHeadAttention(nn.Module):
                     attn_out = F.scaled_dot_product_attention(
                         q, k, v,
                         scale=self.scale,
-                        dropout_p=self.config.dropout,
                         is_causal=False
                     )  # [batch_size, n_heads, seq_len, d_head]
                     #attn_out = flash_attn_decode(

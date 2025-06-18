@@ -22,8 +22,8 @@ class TrainConfig:
     gradient_accumulation_steps: int = 512 // per_device_train_batch_size  # 512 = global batch size
     num_train_epochs: int = 1
     learning_rate: float = 5e-4
-    weight_decay: float = 0.01
-    attn_decay: float = None
+    weight_decay: float = 0.1
+    attn_decay: float = 0.5
     optim: torch.optim.Optimizer = torch.optim.AdamW
     betas: tuple[float, float] = (0.9, 0.95)
     eps: float = 1e-8
@@ -58,7 +58,7 @@ class ModelConfig:
     flash: bool = True
     n_heads: int = 12
     d_head: int = 64
-    scale: float = None
+    attn_temperature: float = 2
     attn_bias: bool = False
     n_kv_heads: Optional[int] = None
     rank: Optional[int] = None
