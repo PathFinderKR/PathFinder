@@ -77,8 +77,8 @@ class MultiHeadAttention(nn.Module):
                     )                                                           # [batch_size, n_heads, seq_len, d_head]
                 else:                  # -----Decode
                     attn_out = F.scaled_dot_product_attention(
-                        q,
-                        k, v,
+                        q,                                                            # [batch_size, n_heads, 1, d_head]
+                        k, v,                                                   # [batch_size, n_heads, seq_len, d_head]
                         scale=self.scale,
                         is_causal=False
                     )                                                           # [batch_size, n_heads, seq_len, d_head]
@@ -394,21 +394,40 @@ def test_model_profiling():
         n_layers=12,
         n_heads=12,
         d_head=64,
-        d_ff=3072,
+        #rank=16,
         attn_bias=True,
-        mlp_bias=True,
-        flash=True
+        flash=True,
+        d_ff=3072,
+        #beta_min=1/2,
+        #beta_max=8,
+        mlp_bias=True
     )
     model = GPT(model_config).to(device)
-    model = torch.compile(model)
+    #model = torch.compile(model)
     print(model)
     print(f"Number of parameters: {model.get_num_params() / 1e6:.2f}M")
 
     # Profiling test
-    input_ids = torch.randint(0, model_config.vocab_size, (1, model_config.max_seq_len), device=device)
-    with profile(activities=[ProfilerActivity.CUDA], record_shapes=True) as prof:
+    ## Prefill
+    batch_size = 32
+    input_ids = torch.randint(0, model_config.vocab_size, (batch_size, model_config.max_seq_len), device=device)
+    print(f"Input shape: {input_ids.shape}")
+    with profile(activities=[ProfilerActivity.CUDA], record_shapes=True, with_stack=True, with_flops=True) as prof:
         with record_function("model_inference"):
             model(input_ids)
+    print(prof.key_averages(group_by_input_shape=True).table(sort_by="cuda_time_total", row_limit=20))
+
+    ## Decode
+    batch_size = 1
+    kv_seq_len = 100
+    input_ids = torch.randint(0, model_config.vocab_size, (batch_size, kv_seq_len), device=device)
+    with profile(activities=[ProfilerActivity.CUDA], record_shapes=True, with_stack=True, with_flops=True) as prof:
+        with record_function("model_inference"):
+            model.generate(
+                input_ids,
+                use_cache=True,
+                max_new_tokens=100,
+            )
     print(prof.key_averages(group_by_input_shape=True).table(sort_by="cuda_time_total", row_limit=20))
 
 
