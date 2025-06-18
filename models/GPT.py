@@ -246,11 +246,13 @@ class GPT(nn.Module, PyTorchModelHubMixin):
 
     def _init_weights(self, module):
         if isinstance(module, nn.Linear):
-            fan_in, _ = nn.init._calculate_fan_in_and_fan_out(module.weight)
-            nn.init.normal_(module.weight, mean=0, std=math.sqrt(2 / fan_in))
+            #fan_in, _ = nn.init._calculate_fan_in_and_fan_out(module.weight)
+            #nn.init.normal_(module.weight, mean=0, std=math.sqrt(2 / fan_in))
+            nn.init.normal_(module.weight, mean=0, std=0.02)
             if module.bias is not None:
-                bound = 1 / math.sqrt(fan_in)
-                nn.init.uniform_(module.bias, -bound, bound)
+                #bound = 1 / math.sqrt(fan_in)
+                #nn.init.uniform_(module.bias, -bound, bound)
+                nn.init.zeros_(module.bias)
         elif isinstance(module, nn.Embedding):
             nn.init.normal_(module.weight, mean=0, std=0.02)
 
