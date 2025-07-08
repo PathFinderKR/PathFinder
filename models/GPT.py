@@ -245,14 +245,32 @@ class GPT(nn.Module, PyTorchModelHubMixin):
         self.apply(self._init_weights)
 
     def _init_weights(self, module):
-        if isinstance(module, nn.Linear):
-            #fan_in, _ = nn.init._calculate_fan_in_and_fan_out(module.weight)
-            #nn.init.normal_(module.weight, mean=0, std=math.sqrt(2 / fan_in))
-            nn.init.normal_(module.weight, mean=0, std=0.02)
-            if module.bias is not None:
-                #bound = 1 / math.sqrt(fan_in)
-                #nn.init.uniform_(module.bias, -bound, bound)
-                nn.init.zeros_(module.bias)
+        """Initialize weights for different module types"""
+        # Attention
+        if isinstance(module, MultiHeadAttention):
+            if hasattr(module, 'qkv_proj'):
+                nn.init.normal_(module.qkv_proj.weight, mean=0, std=0.01)
+                if module.qkv_proj.bias is not None:
+                    nn.init.zeros_(module.qkv_proj.bias)
+            else:
+                nn.init.normal_(module.Wq.weight, mean=0, std=0.01)
+                nn.init.normal_(module.Wkv_down.weight, mean=0, std=0.01)
+                nn.init.normal_(module.Wk_up.weight, mean=0, std=0.01)
+                nn.init.normal_(module.Wv_up.weight, mean=0, std=0.01)
+            nn.init.normal_(module.out_proj.weight, mean=0, std=0.01)
+            if module.out_proj.bias is not None:
+                nn.init.zeros_(module.out_proj.bias)
+
+        # FeedForward
+        elif isinstance(module, FeedForward):
+            nn.init.normal_(module.fc1.weight, mean=0, std=0.02)
+            if module.fc1.bias is not None:
+                nn.init.zeros_(module.fc1.bias)
+            nn.init.normal_(module.fc2.weight, mean=0, std=0.02)
+            if module.fc2.bias is not None:
+                nn.init.zeros_(module.fc2.bias)
+
+        # Embedding
         elif isinstance(module, nn.Embedding):
             nn.init.normal_(module.weight, mean=0, std=0.02)
 

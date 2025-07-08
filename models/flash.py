@@ -181,56 +181,49 @@ def flash_attention_25_decode_kernel(
     IS_CAUSAL: tl.constexpr,
 ):
     # Program IDs
-    off_hz = tl.program_id(0)  # (batch * head)
-    off_n_block = tl.program_id(1)  # kv block offset
+    off_pid = tl.program_id(0)
 
-    off_h = off_hz % H
-    off_z = off_hz // H
-    start_n = off_n_block * BLOCK_N
+    off_n = off_pid % N_CTX  # 현재는 이걸 무시할 것 (우린 N_CTX 전체 순회)
+    off_h = (off_pid // N_CTX) % H
+    off_b = off_pid // (N_CTX * H)
 
     # Index ranges
-    offs_n = tl.arange(0, BLOCK_N)
+    offs_n = tl.arange(0, N_CTX)  # 모든 kv 토큰
     offs_d = tl.arange(0, BLOCK_D)
 
     # Tensor pointers
-    q_ptrs = Q + off_z * stride_qb + off_h * stride_qh + offs_d * stride_qk
-    k_ptrs = K + off_z * stride_kb + off_h * stride_kh + (start_n + offs_n)[:, None] * stride_kn + offs_d[None, :] * stride_kk
-    v_ptrs = V + off_z * stride_vb + off_h * stride_vh + (start_n + offs_n)[:, None] * stride_vn + offs_d[None, :] * stride_vk
-    o_ptrs = O + off_z * stride_ob + off_h * stride_oh + offs_d * stride_ok
+    q_ptrs = Q + off_b * stride_qb + off_h * stride_qh + offs_d * stride_qk
+    k_ptrs = K + off_b * stride_kb + off_h * stride_kh + offs_n[:, None] * stride_kn + offs_d[None, :] * stride_kk
+    v_ptrs = V + off_b * stride_vb + off_h * stride_vh + offs_n[:, None] * stride_vn + offs_d[None, :] * stride_vk
+    o_ptrs = O + off_b * stride_ob + off_h * stride_oh + offs_d * stride_ok
 
     # Load query
     q = tl.load(q_ptrs, mask=offs_d < D_HEAD, other=0.0)
 
-    # Load key and value blocks
-    mask = (start_n + offs_n) < N_CTX
-    k = tl.load(k_ptrs, mask=mask[:, None] & (offs_d[None, :] < D_HEAD), other=0.0)
-    v = tl.load(v_ptrs, mask=mask[:, None] & (offs_d[None, :] < D_HEAD), other=0.0)
+    # Load key and value
+    k = tl.load(k_ptrs, mask=(offs_n[:, None] < N_CTX) & (offs_d[None, :] < D_HEAD), other=0.0)
+    v = tl.load(v_ptrs, mask=(offs_n[:, None] < N_CTX) & (offs_d[None, :] < D_HEAD), other=0.0)
 
-    # Attention scores
+    # Compute attention scores
     scale = 1.0 / tl.sqrt(D_HEAD.to(tl.float32))
     scores = tl.sum(q[None, :] * k, axis=1) * scale
 
-    # Optional causal masking
+    # Causal masking
     if IS_CAUSAL:
-        current_pos = N_CTX - 1  # last token (for decoding)
-        causal_mask = (start_n + offs_n) <= current_pos
-        scores = tl.where(causal_mask & mask, scores, -float('inf'))
-    else:
-        scores = tl.where(mask, scores, -float('inf'))
+        current_pos = N_CTX - 1
+        causal_mask = offs_n <= current_pos
+        scores = tl.where(causal_mask, scores, -float('inf'))
 
-    # Replace max(scores) with provided constant
+    # Softmax
     scores -= softmax_scale_factor
-
-    # Softmax computation (without sync)
     probs = tl.exp(scores)
-    probs = tl.where(mask, probs, 0.0)
-
-    # Output accumulation
-    acc = tl.sum(probs[:, None] * v, axis=0)
     sum_exp = tl.sum(probs, axis=0)
-    acc = acc / sum_exp
+    probs = probs / sum_exp
 
-    # Store result
+    # Weighted sum
+    acc = tl.sum(probs[:, None] * v, axis=0)
+
+    # Store
     tl.store(o_ptrs, acc.to(O.dtype.element_ty), mask=offs_d < D_HEAD)
 
 def flash_attention_25(q, k, v, causal=False, softmax_scale_factor=10.0):
@@ -253,7 +246,7 @@ def flash_attention_25(q, k, v, causal=False, softmax_scale_factor=10.0):
     N_CTX = k.shape[2]
 
     o = torch.empty_like(q)
-    grid = (B * H, (N_CTX + BLOCK_N - 1) // BLOCK_N)
+    grid = (B * H * N_CTX,)
 
     flash_attention_25_decode_kernel[grid](
         q, k, v, o,

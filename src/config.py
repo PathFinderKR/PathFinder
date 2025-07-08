@@ -1,7 +1,9 @@
+import os
 from dataclasses import dataclass, field
 from typing import Literal, Optional
 from datetime import datetime
 import torch
+PROJECT_ROOT = os.path.abspath(os.path.dirname(os.path.dirname(__file__)))
 
 
 @dataclass
@@ -128,11 +130,6 @@ gpt2_moe_config = ModelConfig(
     n_experts=4,
     n_activated_experts=1
 )  # 294M (125M)
-#gpt2_router_free_moe_config = ModelConfig(
-#    n_experts=4,
-#    n_activated_experts=1,
-#    router_free=True
-#)  # 294M (125M)
 
 ## nanoGPT Configuration
 nanogpt_config = ModelConfig(

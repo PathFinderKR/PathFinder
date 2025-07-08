@@ -23,6 +23,26 @@ from src.config import (TokenizerConfig, DatasetConfig, TrainConfig,
                         gpt2_moe_config,
                         nanogpt_config, nanogpt_moe_config,
                         pathfinder_config)
+NUM_PROC = 4
+
+
+def collate_fn(batch, tokenizer: AutoTokenizer):
+    """
+    custom collate function to pad the input sequences and create target_ids.
+
+    Args:
+        batch (list): List of dictionaries containing input IDs.
+        tokenizer (AutoTokenizer): Tokenizer to use for padding.
+
+    Returns:
+        dict: Dictionary containing padded input IDs and target_ids.
+    """
+    input_ids = pad_sequence([example["input_ids"] for example in batch], batch_first=True, padding_value=pad_token_id)
+    target_ids = input_ids.clone()
+    target_ids[:, :-1] = input_ids[:, 1:]
+    target_ids[:, -1] =
+    target_ids[target_ids == tokenizer.pad_token_id] = -1
+    return {"input_ids": input_ids, "target_ids": target_ids}
 
 
 class Trainer:
@@ -41,14 +61,31 @@ class Trainer:
         self.val_loader = val_loader
         self.device = device
         self.master_process = master_process
-        if self.train_config.mixed_precision:
-            self.ctx = torch.autocast(device_type="cuda", dtype=torch.bfloat16)
-        else:
-            self.ctx = nullcontext()
+        self.ctx = torch.autocast(device_type="cuda", dtype=torch.bfloat16) if train_config.mixed_precision else nullcontext()
+
+        # Initialize Weights & Biases
+        if self.master_process:
+            wandb.init(
+                project=self.train_config.wandb_project,
+                name=f"{self.train_config.model_name}-{self.train_config.run_name}",
+                config=self.train_config.__dict__,
+                dir=PROJECT_ROOT
+            )
+            wandb.watch(self.model, log="all")
+
+        # Configure optimizer and scheduler
+        self.total_steps = (len(self.train_loader) * self.train_config.num_train_epochs // self.train_config.gradient_accumulation_steps)
+        warmup_steps = int(self.train_config.warmup_ratio * self.total_steps)
+        self.optimizer = self.configure_optimizer()
+        self.scheduler = get_cosine_schedule_with_warmup(
+            self.optimizer,
+            num_warmup_steps=warmup_steps,
+            num_training_steps=self.total_steps
+        )
 
     def configure_optimizer(self):
         """
-        Configure optimizer with different weight decay for different parameter groups.
+        Configure an optimizer with different weight decay for different parameter groups.
         - No weight decay for bias and LayerNorm parameters
         """
         attention_params = []
@@ -90,26 +127,7 @@ class Trainer:
         return optimizer
 
     def train(self):
-        if self.master_process:
-            wandb.init(
-                project=self.train_config.wandb_project,
-                name=f"{self.train_config.model_name}-{self.train_config.run_name}",
-                config=self.train_config.__dict__,
-                dir=PROJECT_ROOT
-            )
-            wandb.watch(self.model, log="all")
-
-        total_steps = (len(self.train_loader) * self.train_config.num_train_epochs // self.train_config.gradient_accumulation_steps)
-        warmup_steps = int(self.train_config.warmup_ratio * total_steps)
-
-        optimizer = self.configure_optimizer()
-        scheduler = get_cosine_schedule_with_warmup(
-            optimizer,
-            num_warmup_steps=warmup_steps,
-            num_training_steps=total_steps
-        )
-
-        progress_bar = tqdm(total=total_steps, desc="Training", disable=not self.master_process)
+        progress_bar = tqdm(total=self.total_steps, desc="Training", disable=not self.master_process)
         step = 0
 
         for epoch in range(self.train_config.num_train_epochs):
@@ -125,20 +143,20 @@ class Trainer:
 
                 if (batch_idx + 1) % self.train_config.gradient_accumulation_steps == 0:
                     grad_norm = clip_grad_norm_(self.model.parameters(), self.train_config.max_grad_norm)
-                    optimizer.step()
-                    scheduler.step()
-                    optimizer.zero_grad()
+                    self.optimizer.step()
+                    self.scheduler.step()
+                    self.optimizer.zero_grad()
                     step += 1
 
                     if self.master_process:
                         wandb.log({
                             "Train Loss": loss.item() * self.train_config.gradient_accumulation_steps,
-                            "Learning Rate": scheduler.get_last_lr()[0],
+                            "Learning Rate": self.scheduler.get_last_lr()[0],
                             "Grad Norm": grad_norm
                         })
                         progress_bar.set_postfix(
                             loss = f"{loss.item() * self.train_config.gradient_accumulation_steps:.4f}",
-                            lr = f"{scheduler.get_last_lr()[0]:.6f}",
+                            lr = f"{self.scheduler.get_last_lr()[0]:.6f}",
                             grad_norm = f"{grad_norm:.4f}",
                             epoch = epoch + 1,
                         )
@@ -238,24 +256,26 @@ def main():
     if master_process:
         print(f"Train size: {len(fineweb_dataset['train'])}, Test size: {len(fineweb_dataset['test'])}")
 
-    def collate_fn(batch, pad_token_id=tokenizer.pad_token_id):
+    def collate_fn(batch, tokenizer: AutoTokenizer):
         """
         custom collate function to pad the input sequences and create target_ids.
 
         Args:
             batch (list): List of dictionaries containing input IDs.
-            pad_token_id (int): Padding token ID.
+            tokenizer (AutoTokenizer): Tokenizer to use for padding.
 
         Returns:
             dict: Dictionary containing padded input IDs and target_ids.
         """
+        pad_token_id = tokenizer.convert_tokens_to_ids(tokenizer.pad_token)
         input_ids = pad_sequence([example["input_ids"] for example in batch], batch_first=True, padding_value=pad_token_id)
         target_ids = input_ids.clone()
         target_ids[:, :-1] = input_ids[:, 1:]
-        target_ids[:, -1] = pad_token_id
-        target_ids[target_ids == pad_token_id] = -1
+        target_ids[:, -1] =
+        target_ids[target_ids == tokenizer.pad_token_id] = -1
         return {"input_ids": input_ids, "target_ids": target_ids}
 
+    # Data samplers
     if ddp:
         train_sampler = DistributedSampler(fineweb_dataset["train"], num_replicas=world_size, rank=rank, shuffle=True)
         val_sampler = DistributedSampler(fineweb_dataset["test"], num_replicas=world_size, rank=rank, shuffle=False)
@@ -263,13 +283,14 @@ def main():
         train_sampler = None
         val_sampler = None
 
+    # DataLoader
     train_loader = DataLoader(
         fineweb_dataset["train"],
         collate_fn=collate_fn,
         batch_size=train_config.per_device_train_batch_size,
         sampler=train_sampler,
         shuffle=False if ddp else True,
-        num_workers=4,
+        num_workers=NUM_PROC,
         pin_memory=True
     )
     val_loader = DataLoader(
@@ -278,7 +299,7 @@ def main():
         batch_size=train_config.per_device_eval_batch_size,
         sampler=val_sampler,
         shuffle=False,
-        num_workers=4,
+        num_workers=NUM_PROC,
         pin_memory=True
     )
 
@@ -329,7 +350,7 @@ def main():
     )
     trainer.train()
 
-    # Save model
+    # Save
     if master_process:
         # Save model locally
         output_dir = os.path.join(PROJECT_ROOT, "checkpoints", train_config.model_name, train_config.run_name)
