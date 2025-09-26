@@ -1,53 +1,122 @@
+import json
 import pandas as pd
-from konlpy.tag import Mecab
+from typing import Dict, Optional
+import torch
 from tokenizers import Tokenizer, models, trainers, normalizers, pre_tokenizers
 from transformers import PreTrainedTokenizerFast
 from src.config import TokenizerConfig, DatasetConfig
 
 
+class CharTokenizer:
+    def __init__(self, vocab: Optional[Dict[str, int]] = None):
+        """
+        Initialize the character-level tokenizer.
+
+        Args:
+            vocab (dict, optional): A pre-defined vocabulary mapping. If None, it will be built from data.
+        """
+
+        self.SPECIAL_TOKENS = [
+            "<|begin_of_text|>",  # BOS
+            "<|end_of_text|>",    # EOS
+            "<|UNK|>",            # Unknown token
+            "<|PAD|>",            # Padding token
+        ]
+
+        if vocab is not None:
+            self.char2idx = vocab
+            self.idx2char = {idx: char for char, idx in vocab.items()}
+            self.vocab_size = len(vocab)
+        else:
+            self.char2idx: Dict[str, int] = {}
+            self.idx2char: Dict[int, str] = {}
+            self.vocab_size: int = 0
+
+    def build_vocab(self, text: str):
+        """
+        Build vocabulary from the provided text.
+
+        Args:
+            text (str): The text data to build the vocabulary from.
+        """
+        unique_chars = sorted(set(text))
+        start_idx = len(self.SPECIAL_TOKENS)
+
+        # Character to index mapping
+        self.char2idx = {char: idx for idx, char in enumerate(self.SPECIAL_TOKENS)}
+        for idx, char in enumerate(unique_chars, start=start_idx):
+            if char not in self.char2idx:
+                self.char2idx[char] = idx
+
+        # Index to character mapping
+        self.idx2char = {idx: char for char, idx in self.char2idx.items()}
+
+        self.vocab_size = len(self.char2idx)
+        print(f"Vocabulary size: {self.vocab_size}")
+
+    def encode(self, text: str) -> torch.Tensor:
+        """
+        Encode a string into a tensor of integer token IDs.
+
+        Args:
+            text (str): The text to encode.
+
+        Returns:
+            torch.Tensor: The encoded tensor.
+        """
+        ids = []
+        for char in text:
+            if char in self.char2idx:
+                ids.append(self.char2idx[char])
+            else:
+                ids.append(self.char2idx["<|UNK|>"])
+        return torch.tensor(ids, dtype=torch.long)
+
+    def decode(self, tokens: torch.Tensor) -> str:
+        """
+        Decode a tensor of integer token IDs into a string.
+
+        Args:
+            tokens (torch.Tensor): The tensor of token IDs.
+
+        Returns:
+            str: The decoded string.
+        """
+        chars = []
+        for idx in tokens:
+            if idx in self.idx2char:
+                chars.append(self.idx2char[idx])
+            else:
+                chars.append("?")
+        return ''.join(chars)
+
+    def save_vocab(self, file_path: str):
+        """
+        Save the vocabulary to a JSON file.
+
+        Args:
+            file_path (str): The path to save the vocabulary file.
+        """
+        with open(file_path, 'w', encoding='utf-8') as f:
+            json.dump(self.char2idx, f, ensure_ascii=False, indent=4)
+        print(f"Vocabulary saved to {file_path}.")
+
+    def load_vocab(self, file_path: str):
+        """
+        Load the vocabulary from a JSON file.
+
+        Args:
+            file_path (str): The path to the vocabulary file.
+        """
+        with open(file_path, 'r', encoding='utf-8') as f:
+            self.char2idx = json.load(f)
+        self.idx2char = {idx: char for char, idx in self.char2idx.items()}
+        self.vocab_size = len(self.char2idx)
+        print(f"Vocabulary loaded from {file_path}.")
+
+
 def main():
-    # Configurations
-    tokenizer_config = TokenizerConfig()
-    dataset_config = DatasetConfig()
-
-    # Load training data
-    train_df = pd.read_csv(dataset_config.train_path, encoding=dataset_config.encoding)
-    train_df = train_df[train_df["generated"] == 0].copy()
-
-    # 형태소 분석기
-    mecab = Mecab()
-    def mecab_texts(texts):
-        for text in texts:
-            tokens = mecab.morphs(text)
-            yield " ".join(tokens)
-
-    # Tokenizer
-    tokenizer = Tokenizer(models.WordPiece(unk_token=tokenizer_config.special_tokens["unk_token"]))
-    tokenizer.normalizer = normalizers.NFKC()
-    tokenizer.pre_tokenizer = pre_tokenizers.Whitespace()
-
-    # Train
-    trainer = trainers.WordPieceTrainer(
-        vocab_size=tokenizer_config.vocab_size,
-        special_tokens=list(tokenizer_config.special_tokens.values())
-    )
-    tokenizer.train_from_iterator(
-        mecab_texts(train_df["full_text"].tolist()),
-        trainer=trainer
-    )
-    tokenizer.save(tokenizer_config.tokenizer_path)
-    print(f"Tokenizer saved to {tokenizer_config.tokenizer_path}")
-
-    # Load and test the tokenizer
-    tokenizer = PreTrainedTokenizerFast(tokenizer_file=tokenizer_config.tokenizer_path)
-    tokenizer.add_special_tokens(tokenizer_config.special_tokens)
-    print(tokenizer)
-    print(f"Vocabulary size: {tokenizer.vocab_size}")
-    print(f"Special tokens: {tokenizer.special_tokens_map}")
-    print(tokenizer.tokenize("수난곡(受難曲)은 배우의 연기 없이 무대에 올려지는 성악을 주로 한 종합 예술이다. "
-                             "이러한 의미에서 오라토리오와 유사하지만, 성경의 사복음서를 기반으로 한 예수 그리스도의 생애를 주로 다루고 있다는 점에서 차이가 있다. "
-                             "또한 이는 주로 독일 계열 작곡가들에게 쓰인 개념이다. "
-                             "수난 또는 수난곡을 뜻하는 영어 'Passion'은 2세기에 나타난 라틴어 'passio'에서 유래하며, 예수의 생애와 고난이란 의미를 담고 있다."))
+    pass
 
 if __name__ == "__main__":
     main()

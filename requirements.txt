@@ -1,3 +1,4 @@
+torch
 wandb
 python-dotenv
 tqdm
@@ -5,7 +6,7 @@ transformers
 datasets
 numpy
 huggingface-hub
+triton
 matplotlib
-pytest
-seaborn
-scipy
+pandas
+tokenizers

@@ -26,25 +26,6 @@ from src.config import (TokenizerConfig, DatasetConfig, TrainConfig,
 NUM_PROC = 4
 
 
-def collate_fn(batch, tokenizer: AutoTokenizer):
-    """
-    custom collate function to pad the input sequences and create target_ids.
-
-    Args:
-        batch (list): List of dictionaries containing input IDs.
-        tokenizer (AutoTokenizer): Tokenizer to use for padding.
-
-    Returns:
-        dict: Dictionary containing padded input IDs and target_ids.
-    """
-    input_ids = pad_sequence([example["input_ids"] for example in batch], batch_first=True, padding_value=pad_token_id)
-    target_ids = input_ids.clone()
-    target_ids[:, :-1] = input_ids[:, 1:]
-    target_ids[:, -1] =
-    target_ids[target_ids == tokenizer.pad_token_id] = -1
-    return {"input_ids": input_ids, "target_ids": target_ids}
-
-
 class Trainer:
     def __init__(
             self,
@@ -230,7 +211,7 @@ def main():
     print(f"MatMul Precision: {train_config.matmul_precision}")
 
     # Reproducibility
-    set_seed(42 + seed_offset)
+    set_seed(train_config.seed + seed_offset)
 
     # Weight&Biases
     if master_process:
@@ -256,25 +237,6 @@ def main():
     if master_process:
         print(f"Train size: {len(fineweb_dataset['train'])}, Test size: {len(fineweb_dataset['test'])}")
 
-    def collate_fn(batch, tokenizer: AutoTokenizer):
-        """
-        custom collate function to pad the input sequences and create target_ids.
-
-        Args:
-            batch (list): List of dictionaries containing input IDs.
-            tokenizer (AutoTokenizer): Tokenizer to use for padding.
-
-        Returns:
-            dict: Dictionary containing padded input IDs and target_ids.
-        """
-        pad_token_id = tokenizer.convert_tokens_to_ids(tokenizer.pad_token)
-        input_ids = pad_sequence([example["input_ids"] for example in batch], batch_first=True, padding_value=pad_token_id)
-        target_ids = input_ids.clone()
-        target_ids[:, :-1] = input_ids[:, 1:]
-        target_ids[:, -1] =
-        target_ids[target_ids == tokenizer.pad_token_id] = -1
-        return {"input_ids": input_ids, "target_ids": target_ids}
-
     # Data samplers
     if ddp:
         train_sampler = DistributedSampler(fineweb_dataset["train"], num_replicas=world_size, rank=rank, shuffle=True)
@@ -284,6 +246,30 @@ def main():
         val_sampler = None
 
     # DataLoader
+    def collate_fn(batch, ignore_index: int = -100) -> dict:
+        """
+        custom collate function to pad the input sequences and create target_ids.
+
+        Args:
+            batch (list): List of dictionaries containing input IDs.
+            ignore_index (int):
+
+        Returns:
+            dict: Dictionary containing padded input IDs, attention masks, and target IDs.
+        """
+        input_ids = pad_sequence([example["input_ids"] for example in batch], batch_first=True, padding_value=tokenizer.pad_token_id)
+
+        attention_mask = (input_ids != tokenizer.pad_token_id).long()
+
+        target_ids = input_ids.clone()
+        target_ids[:, :-1] = input_ids[:, 1:]
+        target_ids[:, -1] = ignore_index
+        target_ids[target_ids == tokenizer.pad_token_id] = ignore_index
+        return {
+            "input_ids": input_ids,
+            #"attention_mask": attention_mask,
+            "target_ids": target_ids
+        }
     train_loader = DataLoader(
         fineweb_dataset["train"],
         collate_fn=collate_fn,
@@ -291,6 +277,7 @@ def main():
         sampler=train_sampler,
         shuffle=False if ddp else True,
         num_workers=NUM_PROC,
+        persistent_workers=True,
         pin_memory=True
     )
     val_loader = DataLoader(
@@ -300,6 +287,7 @@ def main():
         sampler=val_sampler,
         shuffle=False,
         num_workers=NUM_PROC,
+        persistent_workers=True,
         pin_memory=True
     )
 
