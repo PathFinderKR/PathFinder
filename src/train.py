@@ -22,7 +22,7 @@ from src.config import (TokenizerConfig, DatasetConfig, TrainConfig,
                         gpt2_small_config, gpt2_medium_config, gpt2_large_config, gpt2_xl_config,
                         gpt2_moe_config,
                         nanogpt_config, nanogpt_moe_config,
-                        pathfinder_config)
+                        mla_config, cla_config, hllkv_config)
 NUM_PROC = 4
 
 
@@ -306,8 +306,12 @@ def main():
         model = GPT(nanogpt_config).to(device)
     elif train_config.model_name == "nanoGPT-MoE":
         model = GPT(nanogpt_moe_config).to(device)
-    elif train_config.model_name == "PathFinder":
-        model = GPT(pathfinder_config).to(device)
+    elif train_config.model_name == "GPT2-MLA":
+        model = GPT(mla_config).to(device)
+    elif train_config.model_name == "GPT2-CLA":
+        model = GPT(cla_config).to(device)
+    elif train_config.model_name == "GPT2-HLLKV":
+        model = GPT(hllkv_config).to(device)
     else:
         raise ValueError(f"Unknown model name: {train_config.model_name}")
 

@@ -50,15 +50,14 @@ class MultiHeadAttention(nn.Module):
             # ---------- Linear projection -----------------------------------------------------------------------------
             q, k, v = self.qkv_proj(x).split(self.config.d_embed, dim=2)                # [batch_size, seq_len, d_embed]
 
-            # TODO
             # ---------- Rotary positional embeddings ------------------------------------------------------------------
-
+            # TODO
 
             # ---------- KV cache  -------------------------------------------------------------------------------------
             if kv_cache is not None:
                 k_cache, v_cache = kv_cache                                         # kv_cache[0] -> k, kv_cache[1] -> v
-                k = torch.cat([k_cache, k], dim=1)                              # [batch_size, seq_len, d_embed]
-                v = torch.cat([v_cache, v], dim=1)                              # [batch_size, seq_len, d_embed]
+                k = torch.cat([k_cache, k], dim=1)                                # [batch_size, seq_len, d_embed]
+                v = torch.cat([v_cache, v], dim=1)                                # [batch_size, seq_len, d_embed]
             new_kv_cache = (k, v) if not self.training else None  # Only store cache if generation
             kv_seq_len = k.size(1)
 
@@ -151,7 +150,7 @@ class MultiHeadAttention(nn.Module):
 
                 # ---------- KV cache  ---------------------------------------------------------------------------------
                 if kv_cache is not None:
-                    kv_latent = torch.cat([kv_cache, kv_latent], dim=1)            # [batch_size, seq_len, rank]
+                    kv_latent = torch.cat([kv_cache, kv_latent], dim=1)              # [batch_size, seq_len, rank]
                 new_kv_cache = kv_latent
                 kv_seq_len = kv_latent.size(1)
 
@@ -277,7 +276,10 @@ class GPT(nn.Module, PyTorchModelHubMixin):
     def forward(self, input_ids, target_ids=None, kv_cache=None):
         # Prefill
         if kv_cache is None:
-            kv_cache = [None] * self.config.n_layers
+            if not self.config.cla:
+                kv_cache = [None] * self.config.n_layers
+            else:
+                kv_cache = None
             start_idx = 0
 
         # Decoding
@@ -317,9 +319,20 @@ class GPT(nn.Module, PyTorchModelHubMixin):
 
         # ---------- Blocks --------------------------------------------------------------------------------------------
         new_kv_cache = []
-        for layer_idx, block in enumerate(self.blocks):
-            x, kv_cache_layer = block(x, kv_cache=kv_cache[layer_idx])                  # [batch_size, seq_len, d_embed]
-            new_kv_cache.append(kv_cache_layer)
+        if not self.config.cla:
+            for layer_idx, block in enumerate(self.blocks):
+                x, kv_cache_layer = block(x, kv_cache=kv_cache[layer_idx])              # [batch_size, seq_len, d_embed]
+                new_kv_cache.append(kv_cache_layer)
+        else:
+            cla_cache = None
+            for layer_idx, block in enumerate(self.blocks):
+                if layer_idx == 0:
+                    x, cla_cache = block(x, kv_cache=kv_cache)
+                    print(f"shape of x: {x.shape}")
+                    print(f"size of cla_cache: {cla_cache.size()}")
+                    new_kv_cache.append(cla_cache)
+                else:
+                    x, _ = block(x, kv_cache=cla_cache)
 
         # ---------- Final linear layer --------------------------------------------------------------------------------
         x = self.norm(x)
@@ -412,14 +425,12 @@ def test_model_profiling():
         n_layers=12,
         n_heads=12,
         d_head=64,
-        #rank=16,
-        attn_bias=True,
-        flash=True,
+        rank=16,
+        cla=True,
         d_ff=3072,
-        #beta_min=1/2,
-        #beta_max=8,
+        attn_bias=False,
         mlp_bias=True
-    )
+    )  # 123.84M
     model = GPT(model_config).to(device)
     #model = torch.compile(model)
     print(model)

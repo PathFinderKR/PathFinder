@@ -14,18 +14,18 @@ class TrainConfig:
         "GPT2-small", "GPT2-medium", "GPT2-large", "GPT2-xl",  # GPT-2
         "GPT2-MoE", "GPT2-MoE-router-free",                    # Mixture of Experts
         "nanoGPT", "nanoGPT-MoE",                              # nano versions
-        "PathFinder", "PathFinder-nano",                       # custom models
-    ] = "GPT2-small"
+        "GPT2-MLA", "GPT2-CLA", "GPT2-HLLKV"                   # custom models
+    ] = "GPT2-MLA"
     run_name: str = field(default_factory=lambda: datetime.now().strftime('%Y-%m-%d_%H-%M-%S'))
 
     # Training
-    per_device_train_batch_size: int = 32
-    per_device_eval_batch_size: int = 64
+    per_device_train_batch_size: int = 16
+    per_device_eval_batch_size: int = 32
     gradient_accumulation_steps: int = 512 // per_device_train_batch_size  # 512 = global batch size
     num_train_epochs: int = 1
     learning_rate: float = 6e-4
     weight_decay: float = 0.1
-    attn_decay: float = 0.5
+    attn_decay: float = 0.1
     optim: torch.optim.Optimizer = torch.optim.AdamW
     betas: tuple[float, float] = (0.9, 0.95)
     eps: float = 1e-8
@@ -35,7 +35,7 @@ class TrainConfig:
     seed: int = 42
     ## Precision
     mixed_precision: bool = True
-    matmul_precision: Literal["highest", "high", "medium"] = "high"
+    matmul_precision: Literal["highest", "high", "medium"] = "medium"
 
 @dataclass
 class DatasetConfig:
@@ -60,13 +60,11 @@ class ModelConfig:
     flash: bool = True
     n_heads: int = 12
     d_head: int = 64
-    attn_temperature: float = 2
+    attn_temperature: float = 1
     attn_bias: bool = False
     n_kv_heads: Optional[int] = None
     rank: Optional[int] = None
-    ## Mixture of Attention Heads
-    n_activated_heads: Optional[int] = None
-    n_shared_heads: Optional[int] = None
+    cla: bool = False
 
     # FeedForward
     d_ff: int = 3072
@@ -150,15 +148,36 @@ nanogpt_moe_config = ModelConfig(
 )  # 2.5M (0.9M)
 
 ## Custom Model Configuration
-pathfinder_config = ModelConfig(
-    d_embed=1024,
-    n_layers=10,
-    n_heads=16,
+mla_config = ModelConfig(
+    d_embed=768,
+    n_layers=12,
+    n_heads=12,
     d_head=64,
     rank=32,
-    d_ff=-1,
-    beta_min=1/2,
-    beta_max=4
+    d_ff=3072,
+    attn_bias=False,
+    mlp_bias=True
+)  # 111.17M
+cla_config = ModelConfig(
+    d_embed=768,
+    n_layers=12,
+    n_heads=12,
+    d_head=64,
+    cla=True,
+    d_ff=3072,
+    attn_bias=False,
+    mlp_bias=True
+)  # 123.84M
+hllkv_config = ModelConfig(
+    d_embed=768,
+    n_layers=12,
+    n_heads=12,
+    d_head=64,
+    rank=32,
+    cla=True,
+    d_ff=3072,
+    attn_bias=False,
+    mlp_bias=True
 )  # 123.84M
 
 @dataclass
