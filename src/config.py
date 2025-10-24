@@ -168,7 +168,7 @@ class DatasetConfig:
     dataset_id: Literal["HuggingFaceFW/fineweb-edu"] = "HuggingFaceFW/fineweb-edu"
     remote_name: Optional[str] = "sample-10BT"
     split: Optional[str] = "train"
-    local_dir: str = f"datasets/FineWeb-Edu/10B"
+    local_dir: str = f"FineWeb-Edu/10B"
     val_size: float = 0.01
 
 

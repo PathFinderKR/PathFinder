@@ -6,9 +6,7 @@ import triton
 import triton.language as tl
 from triton.runtime import driver
 from src.utils import set_seed
-MEMORY_LIMIT_GB = 16
-BLOCK_N: tl.constexpr = 128
-BLOCK_D: tl.constexpr = 64
+MEMORY_LIMIT_GB: int = 16
 
 def naive_attention(q, k, v):
     scale = 1.0 / math.sqrt(q.size(-1))
@@ -27,57 +25,48 @@ def flash_attn_2_kernel(
         stride_v_b, stride_v_h, stride_v_t, stride_v_d,
         stride_o_b, stride_o_h, stride_o_t,  stride_o_d,
         B, H, T, D,
-        BLOCK_N: tl.constexpr, BLOCK_D: tl.constexpr
+        BLOCK_T: tl.constexpr, BLOCK_D: tl.constexpr
 ):
     # Program IDs
-    off_hz = tl.program_id(0)
-    off_h = off_hz % H
-    off_z = off_hz // H
+    off_hb = tl.program_id(0)
+    off_h = off_hb % H
+    off_b = off_hb // H
 
-    offs_n = tl.arange(0, BLOCK_N)
+    offs_t = tl.arange(0, BLOCK_T)
     offs_d = tl.arange(0, BLOCK_D)
 
     # Pointers
-    q_ptrs = Q + off_z * stride_q_b + off_h * stride_q_h + offs_d * stride_q_d
-    k_ptrs = K + off_z * stride_k_b + off_h * stride_k_h + offs_n[:, None] * stride_k_t + offs_d[None, :] * stride_k_d
-    v_ptrs = V + off_z * stride_v_b + off_h * stride_v_h + offs_n[:, None] * stride_v_t + offs_d[None, :] * stride_v_d
-    o_ptrs = O + off_z * stride_o_b + off_h * stride_o_h + offs_d * stride_o_d
+    q_ptrs = Q + off_b * stride_q_b + off_h * stride_q_h + offs_d * stride_q_d
+    k_base = K + off_b * stride_k_b + off_h * stride_k_h
+    v_base = V + off_b * stride_v_b + off_h * stride_v_h
+    o_ptrs = O + off_b * stride_o_b + off_h * stride_o_h + offs_d * stride_o_d
 
     # Load single query vector
     q = tl.load(q_ptrs, mask=offs_d < D, other=0.0).to(tl.float32)  # [BLOCK_D]
 
-    # accumulator and softmax statistics
+    # accumulator and online-softmax stats
     acc = tl.zeros([BLOCK_D], dtype=tl.float32)
     max_score = tl.full((), -float("inf"), tl.float32)
     sum_exp = tl.zeros((), dtype=tl.float32)
 
     # Scale
-    scale = 1.0 / tl.sqrt(tl.full((), D, tl.float32))
+    scale = 1.0 / tl.sqrt(tl.full((), D, dtype=tl.float32))
 
-    # Loop over K, V blocks
-    start_n = 0
-    while start_n < T:
-        # Calculate current block bounds
-        remain = T - start_n
-        block_size = tl.minimum(remain, BLOCK_N)
-        mask_n = offs_n < block_size  # [BLOCK_N]
+    # Loop over K, V blocks along T
+    num_blocks = tl.cdiv(T, BLOCK_T)
+    for b in range(0, num_blocks):
+        start_n = b * BLOCK_T
 
         # Load K, V blocks
-        k = tl.load(
-            k_ptrs + start_n * stride_k_t,
-            mask=mask_n[:, None] & (offs_d[None, :] < D),
-            other=0.0,
-        )  # [BLOCK_N, BLOCK_D]
-        v = tl.load(
-            v_ptrs + start_n * stride_v_t,
-            mask=mask_n[:, None] & (offs_d[None, :] < D),
-            other=0.0,
-        )  # [BLOCK_N, BLOCK_D]
+        k_ptrs = k_base + (start_n + offs_t)[:, None] * stride_k_t + offs_d[None, :] * stride_k_d
+        v_ptrs = v_base + (start_n + offs_t)[:, None] * stride_v_t + offs_d[None, :] * stride_v_d
+        mask_load = (start_n + offs_t) < T
+        k = tl.load(k_ptrs, mask=mask_load[:, None] & (offs_d[None, :] < D), other=0.0).to(tl.float32)
+        v = tl.load(v_ptrs, mask=mask_load[:, None] & (offs_d[None, :] < D), other=0.0).to(tl.float32)
 
         # Compute attention scores: q @ K^T
-        scores = tl.sum(k * q[None, :], axis=1) * scale  # [BLOCK_N]
-        neg_inf = tl.full(scores.shape, -float("inf"), scores.dtype)
-        scores = tl.where(mask_n, scores, neg_inf)
+        scores = tl.sum(k * q[None, :], axis=1) * scale
+        scores = tl.where(mask_load, scores, -float("inf"))
 
         # Online softmax update
         block_max = tl.max(scores, axis=0)
@@ -87,20 +76,16 @@ def flash_attn_2_kernel(
         sum_exp *= rescale
 
         # Compute probabilities for current block
-        probs = tl.exp(scores - new_max)  # [BLOCK_N]
-        probs = tl.where(mask_n, probs, 0.0)
+        probs = tl.exp(scores - new_max)
+        probs = tl.where(mask_load, probs, 0.0)
 
         # Update accumulator and sum
         acc += tl.sum(probs[:, None] * v, axis=0)
         sum_exp += tl.sum(probs, axis=0)
         max_score = new_max
 
-        start_n += BLOCK_N
-
     # Final normalization
-    eps = tl.full((), 1e-20, tl.float32)
-    denom = tl.maximum(sum_exp, eps)
-    out = acc / denom
+    out = acc / tl.maximum(sum_exp, 1e-20)
 
     # Store output
     tl.store(o_ptrs, out.to(O.dtype.element_ty), mask=offs_d < D)
@@ -609,14 +594,14 @@ def benchmark(
         d_head = config["d_head"]
         kv_seq_len = config["kv_seq_len"]
 
-        memory = estimate_memory(batch_size, n_heads, kv_seq_len, d_head)
+        memory = estimate_memory(batch_size, n_heads, kv_seq_len, d_head, dtype=dtype)
         if memory > MEMORY_LIMIT_GB:
             print(f"\nConfiguration: {config}")
             print(f"  Memory limit exceeded: {memory:.2f} GB > {MEMORY_LIMIT_GB:.2f} GB")
             continue
 
         try:
-            q = torch.randn(batch_size, n_heads, 1, d_head, device=q.device, dtype=dtype)
+            q = torch.randn(batch_size, n_heads, 1, d_head, device=device, dtype=dtype)
             k = torch.randn(batch_size, n_heads, kv_seq_len, d_head, device=device, dtype=dtype)
             v = torch.randn(batch_size, n_heads, kv_seq_len, d_head, device=device, dtype=dtype)
 
@@ -641,17 +626,16 @@ def main():
     device = torch.device("cuda")
     torch.set_float32_matmul_precision("highest")
     dtype = torch.float32
-    DEVICE = driver.active.get_current_device()
-    properties = driver.active.utils.get_device_properties(DEVICE)
-    NUM_SM = properties["multiprocessor_count"]
-    NUM_REGS = properties["max_num_regs"]
-    SIZE_SMEM = properties["max_shared_mem"]
-    WARP_SIZE = properties["warpSize"]
+    properties = driver.active.utils.get_device_properties(driver.active.get_current_device())
+    num_sm = properties["multiprocessor_count"]
+    num_regs = properties["max_num_regs"]
+    sram_size = properties["max_shared_mem"]
+    warp_size = properties["warpSize"]
     print(f"Device: {torch.cuda.get_device_name(device)}\n"
-          f"Number of SM: {NUM_SM}\n"
-          f"Number of registers: {NUM_REGS}\n"
-          f"Size of SMEM: {SIZE_SMEM}\n"
-          f"Warp size: {WARP_SIZE}")
+          f"Number of SM: {num_sm}\n"
+          f"Number of registers: {num_regs}\n"
+          f"Size of SMEM: {sram_size}\n"
+          f"Warp size: {warp_size}")
     set_seed(42)
 
     # batch_sizes = [1, 2, 4, 8, 16, 32, 64]
