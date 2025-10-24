@@ -5,7 +5,7 @@ import torch.nn.functional as F
 from torch.profiler import profile, record_function, ProfilerActivity
 from huggingface_hub import PyTorchModelHubMixin
 from src.config import ModelConfig
-#from models.flash import flash_attn_decode
+from models.flash2 import flash_attn_decode
 
 
 class MultiHeadAttention(nn.Module):
@@ -14,25 +14,26 @@ class MultiHeadAttention(nn.Module):
         assert config.d_embed % config.n_heads == 0, "Embedding dimension must be divisible by number of heads"
         self.config = config
         self.layer_idx = layer_idx
-        if config.rank is None:
-            # Multi Head Attention
+        if config.attn_type == "MHA": # Multi Head Attention
             self.qkv_proj = nn.Linear(config.d_embed, 3 * config.d_embed, bias=config.attn_bias)
-        else:
-            # Multi Head Latent Attention
+        elif config.attn_type == "GQA": # Grouped Query Attention
+            pass
+        elif config.attn_type == "MLA": # Multi Head Latent Attention
             assert config.rank < config.d_embed, "Rank must be less than embedding dimension"
             self.Wq = nn.Linear(config.d_embed, config.d_embed, bias=False)
             self.Wkv_down = nn.Linear(config.d_embed, config.rank, bias=False)
             self.Wk_up = nn.Linear(config.rank, config.d_embed, bias=False)
             self.Wv_up = nn.Linear(config.rank, config.d_embed, bias=False)
-        if config.attn_temperature is None:
-            self.scale = 1 / math.sqrt(config.d_head)
         else:
-            self.scale = 1 / (config.attn_temperature * math.sqrt(config.d_head))
+            pass
+        self.scale = 1 / math.sqrt(config.d_head)
         self.out_proj = nn.Linear(config.d_embed, config.d_embed, bias=config.attn_bias)
         self.dropout = nn.Dropout(config.dropout)
 
         if config.flash:
             assert hasattr(F, "scaled_dot_product_attention"), "Flash attention requires PyTorch 2.0 or higher"
+            if config.flash_decode:
+                self.softmax_max = 10
         else:
             self.attn_dropout = nn.Dropout(config.dropout)
             self.register_buffer(
@@ -46,7 +47,7 @@ class MultiHeadAttention(nn.Module):
         batch_size, seq_len, _ = x.size()
 
         ########## Multi Head Attention ################################################################################
-        if self.config.rank is None:
+        if self.config.attn_type == "MHA":
             # ---------- Linear projection -----------------------------------------------------------------------------
             q, k, v = self.qkv_proj(x).split(self.config.d_embed, dim=2)                # [batch_size, seq_len, d_embed]
 
@@ -75,12 +76,20 @@ class MultiHeadAttention(nn.Module):
                         is_causal=True if seq_len > 1 else False
                     )                                                           # [batch_size, n_heads, seq_len, d_head]
                 else:                  # -----Decode
-                    attn_out = F.scaled_dot_product_attention(
-                        q,                                                            # [batch_size, n_heads, 1, d_head]
-                        k, v,                                                   # [batch_size, n_heads, seq_len, d_head]
-                        scale=self.scale,
-                        is_causal=False
-                    )                                                           # [batch_size, n_heads, seq_len, d_head]
+                    if self.config.flash_decode:
+                        attn_out = flash_attn_decode(
+                            q,                                                        # [batch_size, n_heads, 1, d_head]
+                            k, v,                                               # [batch_size, n_heads, seq_len, d_head]
+                            scale=self.scale,
+                            #softmax_max=self.softmax_max
+                        )                                                             # [batch_size, n_heads, 1, d_head]
+                    else:
+                        attn_out = F.scaled_dot_product_attention(
+                            q,
+                            k, v,
+                            scale=self.scale,
+                            is_causal=False
+                        )
             else:
                 attn_scores = (q @ k.transpose(-2, -1)) * self.scale           # [batch_size, n_heads, seq_len, seq_len]
                 if kv_cache is None:  # -----Prefill
@@ -102,7 +111,12 @@ class MultiHeadAttention(nn.Module):
             return y, new_kv_cache
 
         ########## Multi Head Latent Attention #########################################################################
-        else:
+        elif self.config.attn_type == "MLA":
+            pass
+            # TODO
+
+        ########## Multi Head Latent Attention #########################################################################
+        elif self.config.attn_type == "MLA":
             if self.training:
                 # ---------- Linear projection -------------------------------------------------------------------------
                 q = self.Wq(x)                                                          # [batch_size, seq_len, d_embed]
@@ -179,7 +193,6 @@ class MultiHeadAttention(nn.Module):
                 attn_output = self.out_proj(attn)                                       # [batch_size, seq_len, d_embed]
                 return attn_output, new_kv_cache
 
-
 class FeedForward(nn.Module):
     def __init__(self, config: ModelConfig, layer_idx: int):
         super().__init__()
@@ -245,6 +258,7 @@ class GPT(nn.Module, PyTorchModelHubMixin):
 
     def _init_weights(self, module):
         """Initialize weights for different module types"""
+        # TODO
         # Attention
         if isinstance(module, MultiHeadAttention):
             if hasattr(module, 'qkv_proj'):
@@ -274,38 +288,42 @@ class GPT(nn.Module, PyTorchModelHubMixin):
             nn.init.normal_(module.weight, mean=0, std=0.02)
 
     def forward(self, input_ids, target_ids=None, kv_cache=None):
-        # Prefill
-        if kv_cache is None:
-            if not self.config.cla:
-                kv_cache = [None] * self.config.n_layers
-            else:
+        if kv_cache is None:  # -----Prefill
+            if self.config.cla:
                 kv_cache = None
+            else:
+                kv_cache = [None] * self.config.n_layers
             start_idx = 0
 
-        # Decoding
-        else:
+        else:                 # -----Decode
             input_ids = input_ids[:, -1:]                                                              # [batch_size, 1]
 
-            if self.config.rank is None:                                                          # Multi Head Attention
+            if self.config.attn_type == "MHA":
                 start_idx = kv_cache[0][0].size(1)
                 # kv_cache[n] -> layer
                 # kv_cache[n][0] -> k, kv_cache[n][1] -> v
                 # k, v: [batch_size, seq_len, d_embed]
                 if kv_cache[0][0].size(1) > self.config.max_seq_len - 1:
                     # RESET KV CACHE
-                    print("Resetting KV cache")
+                    print("\033[91mResetting KV cache\033[0m")
                     kv_cache = [None] * self.config.n_layers
                     start_idx = 0
 
-            else:                                                                          # Multi Head Latent Attention
+            elif self.config.attn_type == "GQA":
+                start_idx = 0
+
+            elif self.config.attn_type == "MLA":
                 start_idx = kv_cache[0].size(1)
                 # kv_cache[n] -> layer
                 # kv_cache[n]: [batch_size, seq_len, rank]
                 if kv_cache[0].size(1) > self.config.max_seq_len - 1:
                     # RESET KV CACHE
-                    print("Resetting KV cache")
+                    print("\033[91mResetting KV cache\033[0m")
                     kv_cache = [None] * self.config.n_layers
                     start_idx = 0
+
+            else:
+                raise ValueError("Unsupported Attention Type")
 
         _, seq_len = input_ids.size()
         device = input_ids.device
@@ -319,11 +337,7 @@ class GPT(nn.Module, PyTorchModelHubMixin):
 
         # ---------- Blocks --------------------------------------------------------------------------------------------
         new_kv_cache = []
-        if not self.config.cla:
-            for layer_idx, block in enumerate(self.blocks):
-                x, kv_cache_layer = block(x, kv_cache=kv_cache[layer_idx])              # [batch_size, seq_len, d_embed]
-                new_kv_cache.append(kv_cache_layer)
-        else:
+        if self.config.cla:
             cla_cache = None
             for layer_idx, block in enumerate(self.blocks):
                 if layer_idx == 0:
@@ -333,16 +347,18 @@ class GPT(nn.Module, PyTorchModelHubMixin):
                     new_kv_cache.append(cla_cache)
                 else:
                     x, _ = block(x, kv_cache=cla_cache)
+        else:
+            for layer_idx, block in enumerate(self.blocks):
+                x, kv_cache_layer = block(x, kv_cache=kv_cache[layer_idx])               # [batch_size, seq_len, d_embed]
+                new_kv_cache.append(kv_cache_layer)
 
         # ---------- Final linear layer --------------------------------------------------------------------------------
         x = self.norm(x)
-        # Training
-        if target_ids is not None:
+        if target_ids is not None:  #----- Training
             logits = self.lm_head(x).view(-1, self.config.vocab_size)               # [batch_size * seq_len, vocab_size]
             targets = target_ids.view(-1)                                                       # [batch_size * seq_len]
             loss = F.cross_entropy(logits, targets, ignore_index=-1)
-        # Generation
-        else:
+        else:                       # -----Generation
             logits = self.lm_head(x[:, -1:, :])                                            # [batch_size, 1, vocab_size]
             loss = None
 
@@ -351,7 +367,7 @@ class GPT(nn.Module, PyTorchModelHubMixin):
     @torch.inference_mode()
     def generate(
             self,
-            idx,
+            input_ids,
             use_cache: bool,
             max_new_tokens: int,
             temperature: float = 1.0,
@@ -361,17 +377,18 @@ class GPT(nn.Module, PyTorchModelHubMixin):
         self.eval()
         if not (temperature > 0):
             raise ValueError("temperature must be positive")
-        if top_k is not None and top_k <= 0:
+        if top_k is not None and top_k < 0:
             raise ValueError("top_k must be a positive integer")
 
         kv_cache = None
         for step in range(max_new_tokens):
             # ---------- Truncate --------------------------------------------------------------------------------------
-            idx_input = idx if idx.size(1) <= self.config.max_seq_len else idx[:, -self.config.max_seq_len:]
+            if input_ids.size(1) > self.config.max_seq_len:
+                input_ids = input_ids[:, -self.config.max_seq_len:]
 
             # ---------- Forward pass ----------------------------------------------------------------------------------
             logits, _, kv_cache = self(
-                idx_input,
+                input_ids,
                 kv_cache=kv_cache if use_cache else None
             )                                                                              # [batch_size, 1, vocab_size]
             logits = logits[:, -1, :]                                                         # [batch_size, vocab_size]
@@ -387,20 +404,20 @@ class GPT(nn.Module, PyTorchModelHubMixin):
 
             # ---------- Sample ----------------------------------------------------------------------------------------
             probs = F.softmax(logits, dim=-1)
-            next_idx = torch.multinomial(probs, num_samples=1)                                         # [batch_size, 1]
+            next_id = torch.multinomial(probs, num_samples=1)                                          # [batch_size, 1]
 
             # ---------- Concatenate -----------------------------------------------------------------------------------
-            idx = torch.cat((idx, next_idx), dim=1)                                  # [batch_size, seq_len + 1]
+            input_ids = torch.cat((input_ids, next_id), dim=1)                        # [batch_size, seq_len + 1]
 
             # ---------- Streaming -------------------------------------------------------------------------------------
-            if tokenizer is not None and idx.size(0) == 1:
+            if tokenizer is not None and input_ids.size(0) == 1:
                 try:
-                    next_str = tokenizer.decode(next_idx[0].tolist())
+                    next_str = tokenizer.decode(next_id[0].tolist())
                     print(next_str, end='', flush=True)
                 except Exception as e:
                     print(f"\nError decoding token: {e}")
 
-        return idx
+        return input_ids
 
     def get_num_params(self):
         return sum(p.numel() for p in self.parameters() if p.requires_grad)

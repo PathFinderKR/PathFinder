@@ -10,12 +10,7 @@ PROJECT_ROOT = os.path.abspath(os.path.dirname(os.path.dirname(__file__)))
 class TrainConfig:
     debug: bool = False
     wandb_project: str = "PathFinder"
-    model_name: Literal[
-        "GPT2-small", "GPT2-medium", "GPT2-large", "GPT2-xl",  # GPT-2
-        "GPT2-MoE", "GPT2-MoE-router-free",                    # Mixture of Experts
-        "nanoGPT", "nanoGPT-MoE",                              # nano versions
-        "GPT2-MLA", "GPT2-CLA", "GPT2-HLLKV"                   # custom models
-    ] = "GPT2-MLA"
+    model_name: str = "GPT2-small"
     run_name: str = field(default_factory=lambda: datetime.now().strftime('%Y-%m-%d_%H-%M-%S'))
 
     # Training
@@ -37,17 +32,6 @@ class TrainConfig:
     mixed_precision: bool = True
     matmul_precision: Literal["highest", "high", "medium"] = "medium"
 
-@dataclass
-class DatasetConfig:
-    dataset_id: Literal["HuggingFaceFW/fineweb-edu"] = "HuggingFaceFW/fineweb-edu"
-    remote_name: Optional[str] = "sample-10BT"
-    split: Optional[str] = "train"
-    local_dir: str = f"datasets/FineWeb-Edu/10B"
-    val_size: float = 0.01
-
-@dataclass
-class TokenizerConfig:
-    tokenizer_id: Literal["gpt2"] = "gpt2"
 
 @dataclass
 class ModelConfig:
@@ -57,14 +41,15 @@ class ModelConfig:
     n_layers: int = 12
 
     # Attention
+    attn_type: Literal["MHA", "GQA", "MLA"] = "MHA"
     flash: bool = True
+    flash_decode: bool = True
     n_heads: int = 12
     d_head: int = 64
-    attn_temperature: float = 1
     attn_bias: bool = False
     n_kv_heads: Optional[int] = None
     rank: Optional[int] = None
-    cla: bool = False
+    cla: bool = True
 
     # FeedForward
     d_ff: int = 3072
@@ -76,7 +61,6 @@ class ModelConfig:
     beta_min: Optional[float] = None
     beta_max: Optional[float] = None
     ## Mixture of Experts
-    router_free: Optional[bool] = False
     n_experts: Optional[int] = None
     n_activated_experts: Optional[int] = None
     n_shared_experts: Optional[int] = None
@@ -92,7 +76,7 @@ gpt2_small_config = ModelConfig(
     n_heads=12,
     d_head=64,
     d_ff=3072,
-    attn_bias=False,
+    attn_bias=True,
     mlp_bias=True
 )  # 124.48M
 gpt2_medium_config = ModelConfig(
@@ -123,12 +107,6 @@ gpt2_xl_config = ModelConfig(
     mlp_bias=True
 )  # 1.3B
 
-## GPT-2 MoE Configuration
-gpt2_moe_config = ModelConfig(
-    n_experts=4,
-    n_activated_experts=1
-)  # 294M (125M)
-
 ## nanoGPT Configuration
 nanogpt_config = ModelConfig(
     d_embed=512,
@@ -137,15 +115,6 @@ nanogpt_config = ModelConfig(
     d_head=64,
     d_ff=2048
 )  # 26M
-nanogpt_moe_config = ModelConfig(
-    d_embed=128,
-    n_layers=4,
-    n_heads=4,
-    d_head=32,
-    d_ff=512,
-    n_experts=4,
-    n_activated_experts=1,
-)  # 2.5M (0.9M)
 
 ## Custom Model Configuration
 mla_config = ModelConfig(
@@ -153,8 +122,9 @@ mla_config = ModelConfig(
     n_layers=12,
     n_heads=12,
     d_head=64,
-    rank=32,
     d_ff=3072,
+    attn_type="MLA",
+    rank=32,
     attn_bias=False,
     mlp_bias=True
 )  # 111.17M
@@ -163,8 +133,8 @@ cla_config = ModelConfig(
     n_layers=12,
     n_heads=12,
     d_head=64,
-    cla=True,
     d_ff=3072,
+    cla=True,
     attn_bias=False,
     mlp_bias=True
 )  # 123.84M
@@ -173,12 +143,30 @@ hllkv_config = ModelConfig(
     n_layers=12,
     n_heads=12,
     d_head=64,
+    attn_type="MLA",
     rank=32,
     cla=True,
     d_ff=3072,
     attn_bias=False,
     mlp_bias=True
 )  # 123.84M
+
+model_config = gpt2_small_config
+
+
+@dataclass
+class TokenizerConfig:
+    tokenizer_id: Literal["gpt2"] = "gpt2"
+
+
+@dataclass
+class DatasetConfig:
+    dataset_id: Literal["HuggingFaceFW/fineweb-edu"] = "HuggingFaceFW/fineweb-edu"
+    remote_name: Optional[str] = "sample-10BT"
+    split: Optional[str] = "train"
+    local_dir: str = f"datasets/FineWeb-Edu/10B"
+    val_size: float = 0.01
+
 
 @dataclass
 class GenerationConfig:

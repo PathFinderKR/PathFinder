@@ -18,11 +18,7 @@ PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(PROJECT_ROOT)
 from src.utils import set_seed
 from models.GPT import GPT
-from src.config import (TokenizerConfig, DatasetConfig, TrainConfig,
-                        gpt2_small_config, gpt2_medium_config, gpt2_large_config, gpt2_xl_config,
-                        gpt2_moe_config,
-                        nanogpt_config, nanogpt_moe_config,
-                        mla_config, cla_config, hllkv_config)
+from src.config import TrainConfig, model_config, TokenizerConfig, DatasetConfig
 NUM_PROC = 4
 
 
@@ -259,7 +255,7 @@ def main():
         """
         input_ids = pad_sequence([example["input_ids"] for example in batch], batch_first=True, padding_value=tokenizer.pad_token_id)
 
-        attention_mask = (input_ids != tokenizer.pad_token_id).long()
+        # attention_mask = (input_ids != tokenizer.pad_token_id).long()
 
         target_ids = input_ids.clone()
         target_ids[:, :-1] = input_ids[:, 1:]
@@ -292,29 +288,7 @@ def main():
     )
 
     # Model
-    if train_config.model_name == "GPT2-small":
-        model = GPT(gpt2_small_config).to(device)
-    elif train_config.model_name == "GPT2-medium":
-        model = GPT(gpt2_medium_config).to(device)
-    elif train_config.model_name == "GPT2-large":
-        model = GPT(gpt2_large_config).to(device)
-    elif train_config.model_name == "GPT2-xl":
-        model = GPT(gpt2_xl_config).to(device)
-    elif train_config.model_name == "GPT2-MoE":
-        model = GPT(gpt2_moe_config).to(device)
-    elif train_config.model_name == "nanoGPT":
-        model = GPT(nanogpt_config).to(device)
-    elif train_config.model_name == "nanoGPT-MoE":
-        model = GPT(nanogpt_moe_config).to(device)
-    elif train_config.model_name == "GPT2-MLA":
-        model = GPT(mla_config).to(device)
-    elif train_config.model_name == "GPT2-CLA":
-        model = GPT(cla_config).to(device)
-    elif train_config.model_name == "GPT2-HLLKV":
-        model = GPT(hllkv_config).to(device)
-    else:
-        raise ValueError(f"Unknown model name: {train_config.model_name}")
-
+    model = GPT(model_config).to(device)
     model = torch.compile(model)
     if ddp:
         model = DDP(

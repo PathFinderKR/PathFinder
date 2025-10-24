@@ -1,0 +1,29 @@
+<component name="InspectionProjectProfileManager">
+  <profile version="1.0">
+    <option name="myName" value="Project Default" />
+    <inspection_tool class="PyPackageRequirementsInspection" enabled="true" level="WARNING" enabled_by_default="true">
+      <option name="ignoredPackages">
+        <list>
+          <option value="wandb" />
+          <option value="python-dotenv" />
+          <option value="tqdm" />
+          <option value="transformers" />
+          <option value="datasets" />
+          <option value="numpy" />
+          <option value="huggingface-hub" />
+          <option value="matplotlib" />
+          <option value="pytest" />
+          <option value="seaborn" />
+          <option value="scipy" />
+        </list>
+      </option>
+    </inspection_tool>
+    <inspection_tool class="PyPep8NamingInspection" enabled="true" level="WEAK WARNING" enabled_by_default="true">
+      <option name="ignoredErrors">
+        <list>
+          <option value="N803" />
+        </list>
+      </option>
+    </inspection_tool>
+  </profile>
+</component>
