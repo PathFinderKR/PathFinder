@@ -5,7 +5,7 @@ import torch.nn.functional as F
 from torch.profiler import profile, record_function, ProfilerActivity
 from huggingface_hub import PyTorchModelHubMixin
 from src.config import ModelConfig
-from models.flash2 import flash_attn_decode
+from models.flash2 import flash_decoding_2
 
 
 class MultiHeadAttention(nn.Module):
@@ -77,7 +77,7 @@ class MultiHeadAttention(nn.Module):
                     )                                                           # [batch_size, n_heads, seq_len, d_head]
                 else:                  # -----Decode
                     if self.config.flash_decode:
-                        attn_out = flash_attn_decode(
+                        attn_out = flash_decoding_2(
                             q,                                                        # [batch_size, n_heads, 1, d_head]
                             k, v,                                               # [batch_size, n_heads, seq_len, d_head]
                             scale=self.scale,

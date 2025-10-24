@@ -62,13 +62,13 @@ def split_text(text: str, val_size: float) -> Tuple[str, str]:
 
 
 def speedometer(
-        model: nn.Module,
-        input_ids: torch.Tensor,
-        use_cache: bool,
-        warmup_tokens: int = 1000,
-        timing_tokens: int = 1000,
-        num_runs: int = 10,
-        **generate_kwargs
+    model: nn.Module,
+    input_ids: torch.Tensor,
+    use_cache: bool,
+    warmup_tokens: int = 1000,
+    timing_tokens: int = 1000,
+    num_runs: int = 10,
+    **generate_kwargs
 ) -> None:
     """
     Measure inference speed of a model.
