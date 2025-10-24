@@ -66,7 +66,7 @@ class ModelConfig:
     n_activated_experts: Optional[int] = None
     n_shared_experts: Optional[int] = None
 
-    attn_std: float = 0.01
+    attn_std: float = 0.02
     ff_std: float = 0.02
     embed_std: float = 0.02
     norm_eps: float = 1e-5
