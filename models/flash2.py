@@ -6,125 +6,9 @@ import triton
 import triton.language as tl
 from triton.runtime import driver
 from src.utils import set_seed
-device = torch.device("cuda")
-torch.set_float32_matmul_precision("high")
-dtype = torch.float32
 MEMORY_LIMIT_GB = 16
-DEVICE = driver.active.get_current_device()
-properties = driver.active.utils.get_device_properties(DEVICE)
-NUM_SM = properties["multiprocessor_count"]
-NUM_REGS = properties["max_num_regs"]
-SIZE_SMEM = properties["max_shared_mem"]
-WARP_SIZE = properties["warpSize"]
 BLOCK_N: tl.constexpr = 128
 BLOCK_D: tl.constexpr = 64
-
-def print_device_info():
-    print(f"Device: {torch.cuda.get_device_name(device)}\n"
-          f"Number of SM: {NUM_SM}\n"
-          f"Number of registers: {NUM_REGS}\n"
-          f"Size of SMEM: {SIZE_SMEM}\n"
-          f"Warp size: {WARP_SIZE}")
-
-def estimate_memory(batch_size, n_heads, kv_seq_len, d_head):
-    if dtype == torch.float16 or dtype == torch.bfloat16:
-        bytes_per_element = 2
-    elif dtype == torch.float32:
-        bytes_per_element = 4
-    else:
-        raise ValueError("Unsupported data type")
-    total_bytes = batch_size * n_heads * kv_seq_len * d_head * 2 * bytes_per_element # 2 -> Keys & Values
-    memory = total_bytes / (1024 ** 3)
-    return memory
-
-def speedometer(fn, *args, num_warmups, num_runs):
-    output = None
-
-    for _ in range(num_warmups):
-        _ = fn(*args)
-
-    torch.cuda.synchronize()
-    start_time = time.time()
-
-    for _ in range(num_runs):
-        output = fn(*args)
-
-    torch.cuda.synchronize()
-    end_time = time.time()
-
-    return (end_time - start_time) / num_runs, output
-
-def print_results(algorithms, batch_size, n_heads, d_head, kv_seq_len, memory, rtol, atol):
-    print(f"\n{'Algorithm':<20} {'Time(ms)':<10} {'Speedup':<10} {'Throughput(M tok/s)':<20} {'Accuracy':<10}")
-    print("─" * 80)
-
-    baseline_time = algorithms[0][1]
-    baseline_output = algorithms[0][2]
-
-    for name, exec_time, output in algorithms:
-        if exec_time and exec_time > 0:
-            speedup_val = (baseline_time / exec_time) if baseline_time else float('inf')
-            throughput_val = (batch_size * kv_seq_len) / exec_time / 1e6
-        else:
-            speedup_val = float('inf')
-            throughput_val = float('inf')
-
-        speedup = f"{speedup_val:.2f}x" if speedup_val != float('inf') else "inf"
-        throughput = f"{throughput_val:.2f}" if throughput_val != float('inf') else "inf"
-
-        try:
-            ok = torch.allclose(output, baseline_output, rtol=rtol, atol=atol)
-            if ok:
-                accuracy = "✅ Pass"
-            else:
-                max_err = torch.max(torch.abs(output - baseline_output)).item()
-                accuracy = f"⚠️ {max_err:.1e}"
-        except Exception as e:
-            accuracy = f"⚠️ compare error: {e}"
-
-        print(f"{name:<20} {exec_time * 1000:<10.2f} {speedup:<10} {throughput:<20} {accuracy:<10}")
-
-    print(f"\nConfiguration:")
-    print(f"  batch_size={batch_size}, n_heads={n_heads}, d_head={d_head}, kv_seq_len={kv_seq_len}")
-    print(f"  KV Cache={memory:.2f} GB\n")
-
-def benchmark(configs, algorithms,
-              num_warmup: int = 5, num_run: int = 10,
-              rtol: float = 1e-3, atol: float = 1e-3):
-    all_results = []
-
-    for config in configs:
-        batch_size = config["batch_size"]
-        n_heads = config["n_heads"]
-        d_head = config["d_head"]
-        kv_seq_len = config["kv_seq_len"]
-
-        memory = estimate_memory(batch_size, n_heads, kv_seq_len, d_head)
-        if memory > MEMORY_LIMIT_GB:
-            print(f"\nConfiguration: {config}")
-            print(f"  Memory limit exceeded: {memory:.2f} GB > {MEMORY_LIMIT_GB:.2f} GB")
-            continue
-
-        try:
-            q = torch.randn(batch_size, n_heads, 1, d_head, device=device, dtype=dtype)
-            k = torch.randn(batch_size, n_heads, kv_seq_len, d_head, device=device, dtype=dtype)
-            v = torch.randn(batch_size, n_heads, kv_seq_len, d_head, device=device, dtype=dtype)
-
-            results = []
-            for name, fn in algorithms:
-                try:
-                    exec_time, output = speedometer(fn, q, k, v, num_warmups=num_warmup, num_runs=num_run)
-                    results.append((name, exec_time, output))
-                except Exception as e:
-                    print(f"{name} failed: {e}")
-
-            print_results(results, batch_size, n_heads, d_head, kv_seq_len, memory, rtol, atol)
-            all_results.append((config, results))
-
-        except Exception as e:
-            print(f"Unexpected error in config {config}: {e}")
-
-    return all_results
 
 def naive_attention(q, k, v):
     scale = 1.0 / math.sqrt(q.size(-1))
@@ -648,9 +532,125 @@ def flash_decoding_2(q, k, v, fixmax: float = 10):
     )
     return o
 
+def estimate_memory(batch_size: int, n_heads: int, kv_seq_len: int, d_head: int, dtype: torch.dtype):
+    if dtype == torch.float16 or dtype == torch.bfloat16:
+        bytes_per_element = 2
+    elif dtype == torch.float32:
+        bytes_per_element = 4
+    else:
+        raise ValueError("Unsupported data type")
+    total_bytes = batch_size * n_heads * kv_seq_len * d_head * 2 * bytes_per_element # 2 -> Keys & Values
+    memory = total_bytes / (1024 ** 3)
+    return memory
+
+def speedometer(fn, *args, num_warmups: int, num_runs: int):
+    output = None
+
+    for _ in range(num_warmups):
+        _ = fn(*args)
+
+    torch.cuda.synchronize()
+    start_time = time.time()
+
+    for _ in range(num_runs):
+        output = fn(*args)
+
+    torch.cuda.synchronize()
+    end_time = time.time()
+
+    return (end_time - start_time) / num_runs, output
+
+def print_results(algorithms, batch_size, n_heads, d_head, kv_seq_len, memory, rtol, atol):
+    print(f"\n{'Algorithm':<20} {'Time(ms)':<10} {'Speedup':<10} {'Throughput(M tok/s)':<20} {'Accuracy':<10}")
+    print("─" * 80)
+
+    baseline_time = algorithms[0][1]
+    baseline_output = algorithms[0][2]
+
+    for name, exec_time, output in algorithms:
+        if exec_time and exec_time > 0:
+            speedup_val = (baseline_time / exec_time) if baseline_time else float('inf')
+            throughput_val = (batch_size * kv_seq_len) / exec_time / 1e6
+        else:
+            speedup_val = float('inf')
+            throughput_val = float('inf')
+
+        speedup = f"{speedup_val:.2f}x" if speedup_val != float('inf') else "inf"
+        throughput = f"{throughput_val:.2f}" if throughput_val != float('inf') else "inf"
+
+        try:
+            ok = torch.allclose(output, baseline_output, rtol=rtol, atol=atol)
+            if ok:
+                accuracy = "✅ Pass"
+            else:
+                max_err = torch.max(torch.abs(output - baseline_output)).item()
+                accuracy = f"⚠️ {max_err:.1e}"
+        except Exception as e:
+            accuracy = f"⚠️ compare error: {e}"
+
+        print(f"{name:<20} {exec_time * 1000:<10.2f} {speedup:<10} {throughput:<20} {accuracy:<10}")
+
+    print(f"\nConfiguration:")
+    print(f"  batch_size={batch_size}, n_heads={n_heads}, d_head={d_head}, kv_seq_len={kv_seq_len}")
+    print(f"  KV Cache={memory:.2f} GB\n")
+
+def benchmark(
+    configs, algorithms,
+    dtype: torch.dtype, device: torch.device,
+    num_warmup: int = 5, num_run: int = 10,
+    rtol: float = 1e-3, atol: float = 1e-3
+):
+    all_results = []
+
+    for config in configs:
+        batch_size = config["batch_size"]
+        n_heads = config["n_heads"]
+        d_head = config["d_head"]
+        kv_seq_len = config["kv_seq_len"]
+
+        memory = estimate_memory(batch_size, n_heads, kv_seq_len, d_head)
+        if memory > MEMORY_LIMIT_GB:
+            print(f"\nConfiguration: {config}")
+            print(f"  Memory limit exceeded: {memory:.2f} GB > {MEMORY_LIMIT_GB:.2f} GB")
+            continue
+
+        try:
+            q = torch.randn(batch_size, n_heads, 1, d_head, device=q.device, dtype=dtype)
+            k = torch.randn(batch_size, n_heads, kv_seq_len, d_head, device=device, dtype=dtype)
+            v = torch.randn(batch_size, n_heads, kv_seq_len, d_head, device=device, dtype=dtype)
+
+            results = []
+            for name, fn in algorithms:
+                try:
+                    exec_time, output = speedometer(fn, q, k, v, num_warmups=num_warmup, num_runs=num_run)
+                    results.append((name, exec_time, output))
+                except Exception as e:
+                    print(f"{name} failed: {e}")
+
+            print_results(results, batch_size, n_heads, d_head, kv_seq_len, memory, rtol, atol)
+            all_results.append((config, results))
+
+        except Exception as e:
+            print(f"Unexpected error in config {config}: {e}")
+
+    return all_results
+
 def main():
+    device = torch.device("cuda")
+    torch.set_float32_matmul_precision("highest")
+    dtype = torch.float32
+    DEVICE = driver.active.get_current_device()
+    properties = driver.active.utils.get_device_properties(DEVICE)
+    NUM_SM = properties["multiprocessor_count"]
+    NUM_REGS = properties["max_num_regs"]
+    SIZE_SMEM = properties["max_shared_mem"]
+    WARP_SIZE = properties["warpSize"]
+    print(f"Device: {torch.cuda.get_device_name(device)}\n"
+          f"Number of SM: {NUM_SM}\n"
+          f"Number of registers: {NUM_REGS}\n"
+          f"Size of SMEM: {SIZE_SMEM}\n"
+          f"Warp size: {WARP_SIZE}")
     set_seed(42)
-    print_device_info()
 
     # batch_sizes = [1, 2, 4, 8, 16, 32, 64]
     # n_heads = [12, 24, 32, 40, 96]
@@ -685,7 +685,10 @@ def main():
         ("Flash Decoding", flash_decoding),
         ("Flash Decoding 2",flash_decoding_2),
     ]
-    benchmark(configs=test_configs, algorithms=algorithms)
+    benchmark(
+        configs=test_configs, algorithms=algorithms,
+        dtype=dtype, device=device
+    )
 
 
 if __name__ == "__main__":

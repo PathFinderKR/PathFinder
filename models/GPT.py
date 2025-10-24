@@ -322,7 +322,7 @@ class GPT(nn.Module, PyTorchModelHubMixin):
                 # k, v: [batch_size, seq_len, d_embed]
                 if kv_cache[0][0].size(1) > self.config.max_seq_len - 1:
                     # RESET KV CACHE
-                    print("\033[91mResetting KV cache\033[0m")
+                    print("\033[91mReset KV cache\033[0m")
                     kv_cache = [None] * self.config.n_layers
                     start_idx = 0
 
@@ -335,7 +335,7 @@ class GPT(nn.Module, PyTorchModelHubMixin):
                 # kv_cache[n]: [batch_size, seq_len, rank]
                 if kv_cache[0].size(1) > self.config.max_seq_len - 1:
                     # RESET KV CACHE
-                    print("\033[91mResetting KV cache\033[0m")
+                    print("\033[91mReset KV cache\033[0m")
                     kv_cache = [None] * self.config.n_layers
                     start_idx = 0
 
