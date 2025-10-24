@@ -3,6 +3,9 @@ from typing import Literal, Optional
 from datetime import datetime
 import torch
 
+#####
+# 1. Attention Weight Decay
+# 2. Kaiming He init 0.2 -> 0.1
 
 @dataclass
 class TrainConfig:
@@ -18,7 +21,7 @@ class TrainConfig:
     num_train_epochs: int = 1
     learning_rate: float = 6e-4
     weight_decay: float = 0.1
-    attn_decay: float = 0.1
+    attn_decay: float = 0.5
     optim: torch.optim.Optimizer = torch.optim.AdamW
     betas: tuple[float, float] = (0.9, 0.95)
     eps: float = 1e-8
@@ -63,6 +66,9 @@ class ModelConfig:
     n_activated_experts: Optional[int] = None
     n_shared_experts: Optional[int] = None
 
+    attn_std: float = 0.01
+    ff_std: float = 0.02
+    embed_std: float = 0.02
     norm_eps: float = 1e-5
     dropout: float = 0.01
 
