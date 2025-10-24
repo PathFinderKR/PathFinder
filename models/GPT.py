@@ -109,8 +109,8 @@ class MultiHeadAttention(nn.Module):
             y = self.dropout(y)
             return y, new_kv_cache
 
-        ########## Multi Head Latent Attention #########################################################################
-        elif self.config.attn_type == "MLA":
+        ########## Grouped Query Attention #############################################################################
+        elif self.config.attn_type == "GQA":
             pass
             # TODO
 
@@ -251,34 +251,56 @@ class GPT(nn.Module, PyTorchModelHubMixin):
         self.lm_head = nn.Linear(config.d_embed, config.vocab_size, bias=False)
         self.lm_head.weight = self.token_embedding.weight
 
-        self.apply(self._init_weights)
+        self.apply(self._init_weights_factory(
+            attn_std=self.config.attn_std,
+            ff_std=self.config.ff_std,
+            embed_std=self.config.embed_std
+        ))
 
-    def _init_weights(self, module):
-        """Initialize weights for different module types"""
-        if isinstance(module, MultiHeadAttention):
-            if hasattr(module, 'qkv_proj'):
-                nn.init.normal_(module.qkv_proj.weight, mean=0, std=0.01)
-                if module.qkv_proj.bias is not None:
-                    nn.init.zeros_(module.qkv_proj.bias)
-            else:
-                nn.init.normal_(module.Wq.weight, mean=0, std=0.01)
-                nn.init.normal_(module.Wkv_down.weight, mean=0, std=0.01)
-                nn.init.normal_(module.Wk_up.weight, mean=0, std=0.01)
-                nn.init.normal_(module.Wv_up.weight, mean=0, std=0.01)
-            nn.init.normal_(module.out_proj.weight, mean=0, std=0.01)
-            if module.out_proj.bias is not None:
-                nn.init.zeros_(module.out_proj.bias)
+    def _init_weights_factory(self, attn_std: float, ff_std: float, embed_std: float):
+        def _init(module: nn.Module):
+            if isinstance(module, MultiHeadAttention):
+                if hasattr(module, 'qkv_proj') and isinstance(module.qkv_proj, nn.Linear):
+                    nn.init.normal_(module.qkv_proj.weight, mean=0.0, std=attn_std)
+                    if module.qkv_proj.bias is not None:
+                        nn.init.zeros_(module.qkv_proj.bias)
+                else:
+                    for name in ('q_proj', 'k_proj', 'v_proj', 'Wq', 'Wk', 'Wv', 'Wkv_down', 'Wk_up', 'Wv_up'):
+                        proj = getattr(module, name, None)
+                        if isinstance(proj, nn.Linear):
+                            nn.init.normal_(proj.weight, mean=0.0, std=attn_std)
+                            if proj.bias is not None:
+                                nn.init.zeros_(proj.bias)
+                if hasattr(module, 'out_proj') and isinstance(module.out_proj, nn.Linear):
+                    nn.init.normal_(module.out_proj.weight, mean=0.0, std=attn_std)
+                    if module.out_proj.bias is not None:
+                        nn.init.zeros_(module.out_proj.bias)
 
-        elif isinstance(module, FeedForward):
-            nn.init.normal_(module.fc1.weight, mean=0, std=0.02)
-            if module.fc1.bias is not None:
-                nn.init.zeros_(module.fc1.bias)
-            nn.init.normal_(module.fc2.weight, mean=0, std=0.02)
-            if module.fc2.bias is not None:
-                nn.init.zeros_(module.fc2.bias)
+            elif isinstance(module, FeedForward):
+                if hasattr(module, 'fc1') and isinstance(module.fc1, nn.Linear):
+                    nn.init.normal_(module.fc1.weight, mean=0.0, std=ff_std)
+                    if module.fc1.bias is not None:
+                        nn.init.zeros_(module.fc1.bias)
+                if hasattr(module, 'fc2') and isinstance(module.fc2, nn.Linear):
+                    nn.init.normal_(module.fc2.weight, mean=0.0, std=ff_std)
+                    if module.fc2.bias is not None:
+                        nn.init.zeros_(module.fc2.bias)
 
-        elif isinstance(module, nn.Embedding):
-            nn.init.normal_(module.weight, mean=0, std=0.02)
+            elif isinstance(module, nn.Embedding):
+                nn.init.normal_(module.weight, mean=0.0, std=embed_std)
+
+            elif isinstance(module, nn.LayerNorm):
+                if module.weight is not None:
+                    nn.init.ones_(module.weight)
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
+
+            elif isinstance(module, nn.Linear):
+                nn.init.normal_(module.weight, mean=0.0, std=ff_std)
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
+
+        return _init
 
     def forward(self, input_ids, target_ids=None, kv_cache=None):
         if kv_cache is None:  # -----Prefill
@@ -350,7 +372,7 @@ class GPT(nn.Module, PyTorchModelHubMixin):
         if target_ids is not None:  #----- Training
             logits = self.lm_head(x).view(-1, self.config.vocab_size)               # [batch_size * seq_len, vocab_size]
             targets = target_ids.view(-1)                                                       # [batch_size * seq_len]
-            loss = F.cross_entropy(logits, targets, ignore_index=-1)
+            loss = F.cross_entropy(logits, targets, ignore_index=-100)
         else:                       # -----Generation
             logits = self.lm_head(x[:, -1:, :])                                            # [batch_size, 1, vocab_size]
             loss = None
