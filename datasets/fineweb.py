@@ -1,6 +1,9 @@
 import os
+import sys
 from transformers import AutoTokenizer
 from datasets import load_dataset
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.append(PROJECT_ROOT)
 from src.config import DatasetConfig, TokenizerConfig
 NUM_PROC = 4
 
