@@ -50,7 +50,7 @@ class ModelConfig:
     attn_bias: bool = False
     n_kv_heads: Optional[int] = None
     rank: Optional[int] = None
-    cla: bool = True
+    cla: bool = False
 
     # FeedForward
     d_ff: int = 3072
