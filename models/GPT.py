@@ -366,7 +366,7 @@ class GPT(nn.Module, PyTorchModelHubMixin):
                     x, _ = block(x, kv_cache=cla_cache)
         else:
             for layer_idx, block in enumerate(self.blocks):
-                x, kv_cache_layer = block(x, kv_cache=kv_cache[layer_idx])               # [batch_size, seq_len, d_embed]
+                x, kv_cache_layer = block(x, kv_cache=kv_cache[layer_idx])              # [batch_size, seq_len, d_embed]
                 new_kv_cache.append(kv_cache_layer)
 
         # ---------- Final linear layer --------------------------------------------------------------------------------

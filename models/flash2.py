@@ -7,6 +7,8 @@ import triton.language as tl
 from triton.runtime import driver
 from src.utils import set_seed
 MEMORY_LIMIT_GB: int = 16
+BLOCK_T = 128
+BLOCK_D = 128
 
 def naive_attention(q, k, v):
     scale = 1.0 / math.sqrt(q.size(-1))

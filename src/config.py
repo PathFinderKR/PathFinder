@@ -15,13 +15,13 @@ class TrainConfig:
     run_name: str = field(default_factory=lambda: datetime.now().strftime('%Y-%m-%d_%H-%M-%S'))
 
     # Training
-    per_device_train_batch_size: int = 32
-    per_device_eval_batch_size: int = 64
+    per_device_train_batch_size: int = 16
+    per_device_eval_batch_size: int = 32
     gradient_accumulation_steps: int = 512 // per_device_train_batch_size  # 512 = global batch size
     num_train_epochs: int = 1
     learning_rate: float = 6e-4
     weight_decay: float = 0.1
-    attn_decay: float = 0.5
+    attn_decay: float = 0.1
     optim: torch.optim.Optimizer = torch.optim.AdamW
     betas: tuple[float, float] = (0.9, 0.95)
     eps: float = 1e-8
@@ -44,7 +44,7 @@ class ModelConfig:
     # Attention
     attn_type: Literal["MHA", "GQA", "MLA"] = "MHA"
     flash: bool = True
-    flash_decode: bool = True
+    flash_decode: bool = False
     n_heads: int = 12
     d_head: int = 64
     attn_bias: bool = False
@@ -69,7 +69,7 @@ class ModelConfig:
     attn_std: float = 0.01
     ff_std: float = 0.02
     embed_std: float = 0.02
-    norm_eps: float = 1e-8
+    norm_eps: float = 1e-5
     dropout: float = 0.01
 
 
