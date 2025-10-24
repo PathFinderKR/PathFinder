@@ -80,8 +80,7 @@ class MultiHeadAttention(nn.Module):
                         attn_out = flash_decoding_2(
                             q,                                                        # [batch_size, n_heads, 1, d_head]
                             k, v,                                               # [batch_size, n_heads, seq_len, d_head]
-                            scale=self.scale,
-                            #softmax_max=self.softmax_max
+                            fixmax=self.softmax_max
                         )                                                             # [batch_size, n_heads, 1, d_head]
                     else:
                         attn_out = F.scaled_dot_product_attention(
