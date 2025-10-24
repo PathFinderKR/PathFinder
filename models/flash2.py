@@ -532,6 +532,7 @@ def flash_decoding_2(q, k, v, fixmax: float = 10):
     )
     return o
 
+
 def estimate_memory(batch_size: int, n_heads: int, kv_seq_len: int, d_head: int, dtype: torch.dtype):
     if dtype == torch.float16 or dtype == torch.bfloat16:
         bytes_per_element = 2
@@ -634,6 +635,7 @@ def benchmark(
             print(f"Unexpected error in config {config}: {e}")
 
     return all_results
+
 
 def main():
     device = torch.device("cuda")

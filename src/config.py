@@ -10,7 +10,7 @@ import torch
 @dataclass
 class TrainConfig:
     debug: bool = False
-    wandb_project: str = "PathFinder"
+    wandb_project: str = "Flash Decoding"
     model_name: str = "GPT2-small"
     run_name: str = field(default_factory=lambda: datetime.now().strftime('%Y-%m-%d_%H-%M-%S'))
 
