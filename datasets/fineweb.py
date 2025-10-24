@@ -45,7 +45,12 @@ def main():
     print(f"Tokenizer: {tokenizer}")
 
     # Load FineWeb-Edu dataset
-    fineweb = load_dataset(dataset_config.dataset_id, name=dataset_config.remote_name, split=dataset_config.split, num_proc=NUM_PROC)
+    fineweb = load_dataset(
+        dataset_config.dataset_id,
+        name=dataset_config.remote_name,
+        split=dataset_config.split,
+        num_proc=NUM_PROC
+    )
     print(f"FineWeb-Edu dataset: {fineweb}")
 
     # Tokenize the dataset
