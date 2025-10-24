@@ -15,8 +15,8 @@ class TrainConfig:
     run_name: str = field(default_factory=lambda: datetime.now().strftime('%Y-%m-%d_%H-%M-%S'))
 
     # Training
-    per_device_train_batch_size: int = 16
-    per_device_eval_batch_size: int = 32
+    per_device_train_batch_size: int = 32
+    per_device_eval_batch_size: int = 64
     gradient_accumulation_steps: int = 512 // per_device_train_batch_size  # 512 = global batch size
     num_train_epochs: int = 1
     learning_rate: float = 6e-4
@@ -69,7 +69,7 @@ class ModelConfig:
     attn_std: float = 0.01
     ff_std: float = 0.02
     embed_std: float = 0.02
-    norm_eps: float = 1e-5
+    norm_eps: float = 1e-8
     dropout: float = 0.01
 
 
@@ -80,7 +80,7 @@ gpt2_small_config = ModelConfig(
     n_heads=12,
     d_head=64,
     d_ff=3072,
-    attn_bias=True,
+    attn_bias=False,
     mlp_bias=True
 )  # 124.48M
 gpt2_medium_config = ModelConfig(
@@ -89,7 +89,7 @@ gpt2_medium_config = ModelConfig(
     n_heads=16,
     d_head=64,
     d_ff=4096,
-    attn_bias=True,
+    attn_bias=False,
     mlp_bias=True
 )  # 354.87M
 gpt2_large_config = ModelConfig(
@@ -98,7 +98,7 @@ gpt2_large_config = ModelConfig(
     n_heads=16,
     d_head=96,
     d_ff=6144,
-    attn_bias=True,
+    attn_bias=False,
     mlp_bias=True
 )  # 758.80M
 gpt2_xl_config = ModelConfig(
@@ -107,7 +107,7 @@ gpt2_xl_config = ModelConfig(
     n_heads=24,
     d_head=128,
     d_ff=8192,
-    attn_bias=True,
+    attn_bias=False,
     mlp_bias=True
 )  # 1.3B
 
