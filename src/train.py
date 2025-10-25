@@ -355,4 +355,4 @@ def main():
 if __name__ == "__main__":
     main()
 # To run DDP training, use:
-# OMP_NUM_THREADS=8 torchrun --nproc_per_node=4 train.py
+# OMP_NUM_THREADS=8 torchrun --standalone --nproc_per_node=4 train.py
