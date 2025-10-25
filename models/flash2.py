@@ -106,6 +106,7 @@ def flash_attn_2_kernel(
     # Store output
     tl.store(o_ptrs, out.to(O.dtype.element_ty), mask=offs_d < D)
 
+
 def flash_attn_2(q, k, v):
     """
     Flash Attention 2 Triton Kernel
@@ -138,10 +139,136 @@ def flash_attn_2(q, k, v):
         v.stride(0), v.stride(1), v.stride(2), v.stride(3),
         o.stride(0), o.stride(1), o.stride(2), o.stride(3),
         batch_size, n_heads, kv_seq_len, d_heads,
-        N_BLOCKS=num_blocks, BLOCK_T=BLOCK_T, BLOCK_D=BLOCK_D,
+        N_BLOCKS=num_blocks,
+        BLOCK_T=BLOCK_T, BLOCK_D=BLOCK_D,
         num_warps=NUM_WARPS, num_stages=NUM_STAGES
     )
     return o
+
+@triton.jit
+def flash_attn_2_fixmax_kernel(
+    Q,      # [B, H, 1, D] (bf16)
+    K, V,   # [B, H, T, D] (bf16)
+    O,      # [B, H, 1, D] (bf16)
+    FIXMAX, # scalar (fp32)
+    stride_q_b, stride_q_h, stride_q_t, stride_q_d,
+    stride_k_b, stride_k_h, stride_k_t, stride_k_d,
+    stride_v_b, stride_v_h, stride_v_t, stride_v_d,
+    stride_o_b, stride_o_h, stride_o_t, stride_o_d,
+    B, H, T, D,
+    N_BLOCKS: tl.constexpr,
+    BLOCK_T: tl.constexpr, BLOCK_D: tl.constexpr
+):
+    # Program IDs
+    off_hb = tl.program_id(0)
+    off_h = off_hb % H
+    off_b = off_hb // H
+
+    # Offsets
+    offs_t = tl.arange(0, BLOCK_T)
+    offs_d = tl.arange(0, BLOCK_D)
+
+    # Pointers
+    q_ptrs = Q + off_b * stride_q_b + off_h * stride_q_h + 0 * stride_q_t + offs_d * stride_q_d
+    k_base = K + off_b * stride_k_b + off_h * stride_k_h
+    v_base = V + off_b * stride_v_b + off_h * stride_v_h
+    o_ptrs = O + off_b * stride_o_b + off_h * stride_o_h + 0 * stride_o_t + offs_d * stride_o_d
+
+    # Load query vector
+    q = tl.load(q_ptrs, mask=offs_d < D, other=0.0)  # [BLOCK_D] (bf16)
+    q_fp32 = q.to(tl.float32)
+
+    # accumulator, online-softmax stats (fp32)
+    acc = tl.zeros([BLOCK_D], dtype=tl.float32)
+    sum_exp = tl.zeros((), dtype=tl.float32)
+
+    # Scale (fp32)
+    Df = tl.full((), 0.0, dtype=tl.float32) + D
+    scale = 1.0 / tl.sqrt(Df)
+    neg_inf = tl.full((), -float("inf"), dtype=tl.float32)
+
+    # Fixmax (fp32)
+    fixmax = tl.full((), FIXMAX, dtype=tl.float32)
+
+    # Loop over K, V blocks along T
+    for b in range(0, N_BLOCKS):
+        start_n = b * BLOCK_T
+        t_idx = start_n + offs_t  # [BLOCK_T]
+        mask_t = t_idx < T        # [BLOCK_T]
+        mask_d = offs_d < D       # [BLOCK_D]
+
+        # Pointers
+        k_ptrs = k_base + t_idx[:, None] * stride_k_t + offs_d[None, :] * stride_k_d
+        v_ptrs = v_base + t_idx[:, None] * stride_v_t + offs_d[None, :] * stride_v_d
+
+        # Load K, V blocks (bf16)
+        kv_mask = mask_t[:, None] & mask_d[None, :]
+        k = tl.load(k_ptrs, mask=kv_mask, other=0.0)  # [BLOCK_T, BLOCK_D]
+        v = tl.load(v_ptrs, mask=kv_mask, other=0.0)  # [BLOCK_T, BLOCK_D]
+        k_fp32 = k.to(tl.float32)
+        v_fp32 = v.to(tl.float32)
+
+        # Compute attention scores: q @ K^T
+        scores = tl.sum(k_fp32 * q_fp32[None, :], axis=1) * scale  # [BLOCK_T] (fp32)
+        scores = tl.where(mask_t, scores, neg_inf)
+
+        # Fixed-max softmax probs
+        probs = tl.exp(scores - fixmax)  # [BLOCK_T]
+        probs = tl.where(mask_t, probs, 0.0)
+
+        # Update accumulator and sum
+        acc += tl.sum(probs[:, None] * v_fp32, axis=0)  # [BLOCK_D]
+        sum_exp += tl.sum(probs, axis=0)
+
+    # Final normalization
+    denom = tl.maximum(sum_exp, 1e-20)
+    out = acc / denom
+
+    # Store output
+    tl.store(o_ptrs, out.to(O.dtype.element_ty), mask=offs_d < D)
+
+def flash_attn_2_fixmax(q, k, v, fixmax: float = 10):
+    """
+    Flash Attention 2 Triton Kernel
+
+    Args:
+        q: Query tensor [batch, n_heads, 1, d_head]
+        k: Key tensor   [batch, n_heads, seq_len_k, d_head]
+        v: Value tensor [batch, n_heads, seq_len_v, d_head]
+        fixmax: scalar
+
+    Returns:
+        o: Output tensor [batch, n_heads, 1, d_head]
+    """
+    _, _, q_len, _ = q.shape
+    batch_size, n_heads, kv_seq_len, d_heads = k.shape
+    assert q.ndim == k.ndim == v.ndim == 4
+    assert q_len == 1
+
+    q = q.contiguous()
+    k = k.contiguous()
+    v = v.contiguous()
+
+    o = torch.empty_like(q)
+    grid = (batch_size * n_heads, )
+    num_blocks = triton.cdiv(kv_seq_len, BLOCK_T)
+
+    flash_attn_2_fixmax_kernel[grid](
+        q, k, v, o,
+        fixmax,
+        q.stride(0), q.stride(1), q.stride(2), q.stride(3),
+        k.stride(0), k.stride(1), k.stride(2), k.stride(3),
+        v.stride(0), v.stride(1), v.stride(2), v.stride(3),
+        o.stride(0), o.stride(1), o.stride(2), o.stride(3),
+        batch_size, n_heads, kv_seq_len, d_heads,
+        N_BLOCKS=num_blocks,
+        BLOCK_T=BLOCK_T, BLOCK_D=BLOCK_D,
+        num_warps=NUM_WARPS, num_stages=NUM_STAGES
+    )
+    return o
+
+
+
 
 
 
@@ -308,7 +435,7 @@ def main():
         # ("Flash Attention (Triton)", flash_attn_1),
         ("FA2", F.scaled_dot_product_attention),
         ("FA2 (Triton)", flash_attn_2),
-        #("Flash Attention 2 + fix-max", flash_attn_2_fixmax),
+        ("FA2 + fix-max", flash_attn_2_fixmax),
         #("Flash Decoding", flash_decoding),
         #("Flash Decoding 2",flash_decoding_2),
     ]
