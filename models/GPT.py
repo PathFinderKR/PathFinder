@@ -109,8 +109,8 @@ class MultiHeadAttention(nn.Module):
             y = self.dropout(y)
             return y, new_kv_cache
 
-        ########## Multi Head Latent Attention #########################################################################
-        elif self.config.attn_type == "MLA":
+        ########## Grouped Query Attention #############################################################################
+        elif self.config.attn_type == "GQA":
             pass
             # TODO
 
@@ -219,7 +219,6 @@ class FeedForward(nn.Module):
         x = self.dropout(x)
         return x
 
-
 class Block(nn.Module):
     def __init__(self, config: ModelConfig, layer_idx: int):
         super().__init__()
@@ -236,7 +235,6 @@ class Block(nn.Module):
         x = self.norm2(x)
         x = x + self.mlp(x)
         return x, new_kv_cache
-
 
 class GPT(nn.Module, PyTorchModelHubMixin):
     def __init__(self, config: ModelConfig):
@@ -366,7 +364,7 @@ class GPT(nn.Module, PyTorchModelHubMixin):
                     x, _ = block(x, kv_cache=cla_cache)
         else:
             for layer_idx, block in enumerate(self.blocks):
-                x, kv_cache_layer = block(x, kv_cache=kv_cache[layer_idx])               # [batch_size, seq_len, d_embed]
+                x, kv_cache_layer = block(x, kv_cache=kv_cache[layer_idx])              # [batch_size, seq_len, d_embed]
                 new_kv_cache.append(kv_cache_layer)
 
         # ---------- Final linear layer --------------------------------------------------------------------------------
@@ -374,7 +372,7 @@ class GPT(nn.Module, PyTorchModelHubMixin):
         if target_ids is not None:  #----- Training
             logits = self.lm_head(x).view(-1, self.config.vocab_size)               # [batch_size * seq_len, vocab_size]
             targets = target_ids.view(-1)                                                       # [batch_size * seq_len]
-            loss = F.cross_entropy(logits, targets, ignore_index=-1)
+            loss = F.cross_entropy(logits, targets, ignore_index=-100)
         else:                       # -----Generation
             logits = self.lm_head(x[:, -1:, :])                                            # [batch_size, 1, vocab_size]
             loss = None

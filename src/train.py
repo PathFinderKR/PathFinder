@@ -19,7 +19,7 @@ sys.path.append(PROJECT_ROOT)
 from src.utils import set_seed
 from models.GPT import GPT
 from src.config import TrainConfig, model_config, TokenizerConfig, DatasetConfig
-NUM_PROC = 4
+NUM_PROC = 8
 
 
 class Trainer:
@@ -62,7 +62,7 @@ class Trainer:
 
     def configure_optimizer(self):
         """
-        Configure an optimizer with different weight decay for different parameter groups.
+        Configure optimizer with different weight decay for different parameter groups.
         - No weight decay for bias and LayerNorm parameters
         """
         attention_params = []
@@ -254,7 +254,6 @@ def main():
             dict: Dictionary containing padded input IDs, attention masks, and target IDs.
         """
         input_ids = pad_sequence([example["input_ids"] for example in batch], batch_first=True, padding_value=tokenizer.pad_token_id)
-
         # attention_mask = (input_ids != tokenizer.pad_token_id).long()
 
         target_ids = input_ids.clone()
@@ -266,6 +265,7 @@ def main():
             #"attention_mask": attention_mask,
             "target_ids": target_ids
         }
+
     train_loader = DataLoader(
         fineweb_dataset["train"],
         collate_fn=collate_fn,
@@ -355,4 +355,4 @@ def main():
 if __name__ == "__main__":
     main()
 # To run DDP training, use:
-# OMP_NUM_THREADS=4 torchrun --nproc_per_node=4 train.py
+# OMP_NUM_THREADS=8 torchrun --nproc_per_node=4 train.py
