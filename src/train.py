@@ -19,7 +19,7 @@ sys.path.append(PROJECT_ROOT)
 from src.utils import set_seed
 from models.GPT import GPT
 from src.config import TrainConfig, model_config, TokenizerConfig, DatasetConfig
-NUM_PROC = 4
+NUM_PROC = 8
 
 
 class Trainer:
@@ -355,4 +355,4 @@ def main():
 if __name__ == "__main__":
     main()
 # To run DDP training, use:
-# OMP_NUM_THREADS=4 torchrun --nproc_per_node=4 train.py
+# OMP_NUM_THREADS=8 torchrun --nproc_per_node=4 train.py
