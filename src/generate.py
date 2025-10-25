@@ -50,7 +50,7 @@ def main():
 
     model = torch.compile(model)
     print(model)
-    print(f"Number of parameters: {model.num_params() / 1e6:.2f}M")
+    print(f"Number of parameters: {model.get_num_params() / 1e6:.2f}M")
 
     # Speedometer
     if generation_config.speedometer:
