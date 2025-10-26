@@ -6,7 +6,6 @@ import triton.language as tl
 from triton.runtime import driver
 from src.utils import set_seed
 
-NUM_KV_SPLIT = 16
 FLASH_ATTN_CONFIGS = [
     triton.Config({'BLOCK_T': 256, 'BLOCK_D': 64},  num_warps=4, num_stages=2),
     triton.Config({'BLOCK_T': 256, 'BLOCK_D': 64},  num_warps=8, num_stages=3),
@@ -14,6 +13,9 @@ FLASH_ATTN_CONFIGS = [
     triton.Config({'BLOCK_T': 512, 'BLOCK_D': 64},  num_warps=4, num_stages=2),
     triton.Config({'BLOCK_T': 512, 'BLOCK_D': 64},  num_warps=8, num_stages=3),
     triton.Config({'BLOCK_T': 512, 'BLOCK_D': 64},  num_warps=8, num_stages=4),
+    triton.Config({'BLOCK_T': 1024, 'BLOCK_D': 64},  num_warps=4, num_stages=2),
+    triton.Config({'BLOCK_T': 1024, 'BLOCK_D': 64},  num_warps=8, num_stages=3),
+    triton.Config({'BLOCK_T': 1024, 'BLOCK_D': 64},  num_warps=8, num_stages=4),
 ]
 FLASH_DECODING_PASS1_CONFIGS = [
     triton.Config({'BLOCK_T': 256, 'BLOCK_D': 64},  num_warps=4, num_stages=2),
@@ -22,16 +24,22 @@ FLASH_DECODING_PASS1_CONFIGS = [
     triton.Config({'BLOCK_T': 512, 'BLOCK_D': 64},  num_warps=4, num_stages=2),
     triton.Config({'BLOCK_T': 512, 'BLOCK_D': 64},  num_warps=8, num_stages=3),
     triton.Config({'BLOCK_T': 512, 'BLOCK_D': 64},  num_warps=8, num_stages=4),
+    triton.Config({'BLOCK_T': 1024, 'BLOCK_D': 64},  num_warps=4, num_stages=2),
+    triton.Config({'BLOCK_T': 1024, 'BLOCK_D': 64},  num_warps=8, num_stages=3),
+    triton.Config({'BLOCK_T': 1024, 'BLOCK_D': 64},  num_warps=8, num_stages=4),
 ]
 FLASH_DECODING_PASS2_CONFIGS = [
-    triton.Config({'BLOCK_D': 64}, num_warps=4, num_stages=2),
-    triton.Config({'BLOCK_D': 64}, num_warps=8, num_stages=3),
-    triton.Config({'BLOCK_D': 64}, num_warps=8, num_stages=4),
+    triton.Config({'BLOCK_D': 64, 'BLOCK_P': 8},  num_warps=4, num_stages=2),
+    triton.Config({'BLOCK_D': 64, 'BLOCK_P': 8},  num_warps=8, num_stages=3),
+    triton.Config({'BLOCK_D': 64, 'BLOCK_P': 8},  num_warps=8, num_stages=4),
+    triton.Config({'BLOCK_D': 64, 'BLOCK_P': 16}, num_warps=4, num_stages=2),
+    triton.Config({'BLOCK_D': 64, 'BLOCK_P': 16}, num_warps=8, num_stages=3),
+    triton.Config({'BLOCK_D': 64, 'BLOCK_P': 16},  num_warps=8, num_stages=4),
 ]
 
 
 # FLASH ATTENTION 2
-@triton.autotune(configs=FLASH_ATTN_CONFIGS, key=['T'])
+@triton.autotune(configs=FLASH_ATTN_CONFIGS, key=['T', 'D'])
 @triton.jit
 def flash_attn_2_kernel(
     Q,     # [B, H, 1, D] (bf16)
@@ -60,7 +68,8 @@ def flash_attn_2_kernel(
     o_ptrs = O + off_b * stride_o_b + off_h * stride_o_h + 0 * stride_o_t + offs_d * stride_o_d
 
     # Load query vector
-    q = tl.load(q_ptrs, mask=offs_d < D, other=0.0).to(tl.float32)  # [BLOCK_D]
+    q = tl.load(q_ptrs, mask=offs_d < D, other=0.0)
+    q = tl.reshape(q, (BLOCK_D, 1))
 
     # Constants
     Df      = tl.full((), 0.0, dtype=tl.float32) + D
@@ -85,11 +94,11 @@ def flash_attn_2_kernel(
 
         # Load K, V blocks (bf16)
         kv_mask = mask_t[:, None] & mask_d[None, :]
-        k = tl.load(k_ptrs, mask=kv_mask, other=0.0).to(tl.float32)  # [BLOCK_T, BLOCK_D]
-        v = tl.load(v_ptrs, mask=kv_mask, other=0.0).to(tl.float32)  # [BLOCK_T, BLOCK_D]
+        k = tl.load(k_ptrs, mask=kv_mask, other=0.0)
+        v = tl.load(v_ptrs, mask=kv_mask, other=0.0)
 
         # Compute attention scores: q @ K^T
-        scores = tl.sum(k * q[None, :], axis=1) * scale  # [BLOCK_T] (fp32)
+        scores = tl.dot(k, q, out_dtype=tl.float32) * scale
         scores = tl.where(mask_t, scores, neg_inf)
 
         # Online-softmax update (fp32)
@@ -100,8 +109,7 @@ def flash_attn_2_kernel(
         sum_exp   *= rescale
 
         # Probabilities
-        safe_scores = tl.where(mask_t, scores, new_max)
-        probs = tl.exp(safe_scores - new_max)
+        probs = tl.exp(scores - new_max)
         probs = tl.where(mask_t, probs, 0.0)
 
         # Update accumulator and sum
@@ -153,7 +161,7 @@ def flash_attn_2(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Ten
 
 
 # FLASH ATTENTION 2 (FIX-MAX)
-@triton.autotune(configs=FLASH_ATTN_CONFIGS, key=['T'])
+@triton.autotune(configs=FLASH_ATTN_CONFIGS, key=['T', 'D'])
 @triton.jit
 def flash_attn_2_fixmax_kernel(
     Q,      # [B, H, 1, D] (bf16)
@@ -183,7 +191,8 @@ def flash_attn_2_fixmax_kernel(
     o_ptrs = O + off_b * stride_o_b + off_h * stride_o_h + 0 * stride_o_t + offs_d * stride_o_d
 
     # Load query vector
-    q = tl.load(q_ptrs, mask=offs_d < D, other=0.0).to(tl.float32)  # [BLOCK_D]
+    q = tl.load(q_ptrs, mask=offs_d < D, other=0.0)
+    q = tl.reshape(q, (BLOCK_D, 1))
 
     # Constants
     Df      = tl.full((), 0.0, dtype=tl.float32) + D
@@ -210,11 +219,11 @@ def flash_attn_2_fixmax_kernel(
 
         # Load K, V blocks (bf16)
         kv_mask = mask_t[:, None] & mask_d[None, :]
-        k = tl.load(k_ptrs, mask=kv_mask, other=0.0).to(tl.float32)  # [BLOCK_T, BLOCK_D]
-        v = tl.load(v_ptrs, mask=kv_mask, other=0.0).to(tl.float32)  # [BLOCK_T, BLOCK_D]
+        k = tl.load(k_ptrs, mask=kv_mask, other=0.0)
+        v = tl.load(v_ptrs, mask=kv_mask, other=0.0)
 
         # Compute attention scores: q @ K^T
-        scores = tl.sum(k * q[None, :], axis=1) * scale  # [BLOCK_T] (fp32)
+        scores = tl.dot(k, q, out_dtype=tl.float32) * scale
         scores = tl.where(mask_t, scores, neg_inf)
 
         # Fixed-max softmax probs
@@ -274,7 +283,7 @@ def flash_attn_2_fixmax(
 
 
 # FLASH DECODING
-@triton.autotune(configs=FLASH_DECODING_PASS1_CONFIGS, key=['T'])
+@triton.autotune(configs=FLASH_DECODING_PASS1_CONFIGS, key=['T','D','P'])
 @triton.jit
 def flash_decoding_pass1(
     Q,     # [B, H, 1, D] (bf16)
@@ -308,7 +317,8 @@ def flash_decoding_pass1(
     v_base = V + off_b * stride_v_b + off_h * stride_v_h
 
     # Load query vector
-    q = tl.load(q_ptrs, mask=offs_d < D, other=0.0).to(tl.float32)  # [BLOCK_D]
+    q = tl.load(q_ptrs, mask=offs_d < D, other=0.0)
+    q = tl.reshape(q, (BLOCK_D, 1))
 
     # partition bounds
     T_PART = (T + P - 1) // P
@@ -337,11 +347,11 @@ def flash_decoding_pass1(
 
         # Load K, V blocks
         kv_mask = mask_t[:, None] & (offs_d[None, :] < D)
-        k = tl.load(k_ptrs, mask=kv_mask, other=0.0).to(tl.float32)  # [BLOCK_T, BLOCK_D]
-        v = tl.load(v_ptrs, mask=kv_mask, other=0.0).to(tl.float32)  # [BLOCK_T, BLOCK_D]
+        k = tl.load(k_ptrs, mask=kv_mask, other=0.0)
+        v = tl.load(v_ptrs, mask=kv_mask, other=0.0)
 
         # Compute attention scores: q @ K^T
-        scores = tl.sum(k * q[None, :], axis=1) * scale  # [BLOCK_T]
+        scores = tl.dot(k, q, out_dtype=tl.float32) * scale
         scores = tl.where(mask_t, scores, neg_inf)
 
         # Online-softmax update (fp32)
@@ -352,8 +362,7 @@ def flash_decoding_pass1(
         sum_exp   *= rescale
 
         # Probabilities
-        safe_scores = tl.where(mask_t, scores, new_max)
-        probs = tl.exp(safe_scores - new_max)
+        probs = tl.exp(scores - new_max)
         probs = tl.where(mask_t, probs, 0.0)
 
         # Update accumulator and sum
@@ -366,10 +375,10 @@ def flash_decoding_pass1(
     l_ptr = L + off_b*stride_l_b + off_h*stride_l_h + pid_p*stride_l_p
     a_ptr = A + off_b*stride_a_b + off_h*stride_a_h + pid_p*stride_a_p + offs_d*stride_a_d
     tl.store(m_ptr, tl.where(is_empty, neg_inf, max_score))
-    tl.store(l_ptr, tl.where(is_empty, 0.0,     sum_exp))
-    tl.store(a_ptr, tl.where(offs_d < D, tl.where(is_empty, 0.0, acc), 0.0))
+    tl.store(l_ptr, tl.where(is_empty, 0.0, sum_exp).to(tl.bfloat16))
+    tl.store(a_ptr, tl.where(offs_d < D, tl.where(is_empty, 0.0, acc), 0.0).to(tl.bfloat16))
 
-@triton.autotune(configs=FLASH_DECODING_PASS1_CONFIGS, key=['T'])
+@triton.autotune(configs=FLASH_DECODING_PASS1_CONFIGS, key=['T','D','P'])
 @triton.jit
 def flash_decoding_2_pass1(
     Q,      # [B, H, 1, D] (bf16)
@@ -404,7 +413,8 @@ def flash_decoding_2_pass1(
     v_base = V + off_b*stride_v_b + off_h*stride_v_h
 
     # Load query vector
-    q = tl.load(q_ptrs, mask=offs_d < D, other=0.0).to(tl.float32)
+    q = tl.load(q_ptrs, mask=offs_d < D, other=0.0)
+    q = tl.reshape(q, (BLOCK_D, 1))
 
     # partition bounds
     T_PART = (T + P - 1) // P
@@ -433,30 +443,30 @@ def flash_decoding_2_pass1(
 
         # Load K, V blocks
         kv_mask = mask_t[:, None] & (offs_d[None, :] < D)
-        k = tl.load(k_ptrs, mask=kv_mask, other=0.0).to(tl.float32)  # [BLOCK_T, BLOCK_D]
-        v = tl.load(v_ptrs, mask=kv_mask, other=0.0).to(tl.float32)  # [BLOCK_T, BLOCK_D]
+        k = tl.load(k_ptrs, mask=kv_mask, other=0.0)
+        v = tl.load(v_ptrs, mask=kv_mask, other=0.0)
 
         # Compute attention scores: q @ K^T
-        scores = tl.sum(k * q[None, :], axis=1) * scale               # [BLOCK_T]
-        safe_scores = tl.where(mask_t, scores, fixmax)
+        scores = tl.dot(k, q, out_dtype=tl.float32) * scale
+        scores = tl.where(mask_t, scores, fixmax)
 
         # Probabilities
-        probs = tl.exp(safe_scores - fixmax)
+        probs = tl.exp(scores - fixmax)
         probs = tl.where(mask_t, probs, 0.0)
 
         # Update accumulator and sum
-        acc     += tl.sum(probs[:, None] * v, axis=0)
+        acc += tl.dot(probs, v, out_dtype=tl.float32)
         sum_exp += tl.sum(probs, axis=0)
 
     # Store partition outputs
     m_ptr = M + off_b * stride_m_b + off_h * stride_m_h + pid_p * stride_m_p
     l_ptr = L + off_b * stride_l_b + off_h * stride_l_h + pid_p * stride_l_p
     a_ptr = A + off_b * stride_a_b + off_h * stride_a_h + pid_p * stride_a_p + offs_d * stride_a_d
-    tl.store(m_ptr, tl.where(is_empty, neg_inf, fixmax))  # m = fixed max
-    tl.store(l_ptr, tl.where(is_empty, 0.0, sum_exp))  # l = sum exp(score - mfix)
-    tl.store(a_ptr, tl.where(offs_d < D, tl.where(is_empty, 0.0, acc), 0.0))
+    tl.store(m_ptr, tl.where(is_empty, neg_inf, fixmax))
+    tl.store(l_ptr, tl.where(is_empty, 0.0, sum_exp).to(tl.bfloat16))
+    tl.store(a_ptr, tl.where(offs_d < D, tl.where(is_empty, 0.0, acc), 0.0).to(tl.bfloat16))
 
-@triton.autotune(configs=FLASH_DECODING_PASS2_CONFIGS, key=[])
+@triton.autotune(configs=FLASH_DECODING_PASS2_CONFIGS, key=['D','P'])
 @triton.jit
 def flash_decoding_pass2(
     M, L, A,  # partials
@@ -467,42 +477,49 @@ def flash_decoding_pass2(
     stride_o_b, stride_o_h, stride_o_t, stride_o_d,
     B, H,
     P: tl.constexpr, D: tl.constexpr,
-    BLOCK_D: tl.constexpr,
+    BLOCK_D: tl.constexpr, BLOCK_P: tl.constexpr,
 ):
     # Program IDs
     pid_hb = tl.program_id(0)
+    pid_dt = tl.program_id(1)
     off_h  = pid_hb % H
     off_b  = pid_hb // H
 
     # Offsets
-    offs_p = tl.arange(0, P)
+    offs_d = pid_dt*BLOCK_D + tl.arange(0, BLOCK_D)
+    offs_p = tl.arange(0, BLOCK_P)
 
     # Pointers
-    m_ptrs = M + off_b*stride_m_b + off_h*stride_m_h + offs_p*stride_m_p
-    l_ptrs = L + off_b*stride_l_b + off_h*stride_l_h + offs_p*stride_l_p
     m_base = M + off_b * stride_m_b + off_h * stride_m_h
+    l_base = L + off_b * stride_l_b + off_h * stride_l_h
     a_base = A + off_b * stride_a_b + off_h * stride_a_h
 
-    # Load all partition stats
-    m_i = tl.load(m_ptrs, mask=offs_p < P, other=-float("inf"))  # [P]
-    l_i = tl.load(l_ptrs, mask=offs_p < P, other=0.0)            # [P]
-    m   = tl.max(m_i, axis=0)                                    # scalar
+    m_val = tl.full((), -float("inf"), dtype=tl.float32)
+    for p in range(0, tl.cdiv(P, BLOCK_P)):
+        p_idx = p * BLOCK_P + offs_p
+        m_tile = tl.load(m_base + p_idx * stride_m_p, mask=p_idx < P, other=-float("inf"))
+        m_val = tl.maximum(m_val, tl.max(m_tile, axis=0))
 
-    # Combine sums: Lg = Σ l_i * exp(m_i - m)
-    w   = tl.exp(m_i - m)                                        # [P]
-    Lg  = tl.sum(l_i * w, axis=0)                                # scalar
+    Lg = tl.zeros((), dtype=tl.float32)
+    a_acc = tl.zeros([BLOCK_D], dtype=tl.float32)
 
-    # Combine accumulators: A = Σ A_i * exp(m_i - m)
-    offs_d = tl.arange(0, BLOCK_D)
-    a_acc  = tl.zeros([BLOCK_D], dtype=tl.float32)
+    #
+    for p in range(0, tl.cdiv(P, BLOCK_P)):
+        p_idx = p * BLOCK_P + offs_p
 
-    # static loop
-    for p in range(0, P):
-        a_ptrs = a_base + p * stride_a_p + offs_d * stride_a_d
-        a_i = tl.load(a_ptrs, mask=offs_d < D, other=0.0)   # [BLOCK_D]
-        m_ip = tl.load(m_base + p * stride_m_p)
-        wp = tl.exp(m_ip - m)
-        a_acc += a_i * wp
+        # Pointers
+        l_ptrs = l_base + p_idx * stride_l_p
+        l_tile = tl.load(l_ptrs, mask=p_idx < P, other=0.0).to(tl.float32)
+
+        m_ptrs = m_base + p_idx * stride_m_p
+        m_tile = tl.load(m_ptrs, mask=p_idx < P, other=-float("inf"))
+        w_tile = tl.exp(m_tile - m_val)
+        Lg += tl.sum(l_tile * w_tile, axis=0)
+
+        a_ptrs = a_base + p_idx[:, None] * stride_a_p + offs_d[None, :] * stride_a_d
+        mask_a = (p_idx[:, None] < P) & (offs_d[None, :] < D)
+        a_tile = tl.load(a_ptrs, mask=mask_a, other=0.0).to(tl.float32)
+        a_acc += tl.sum(a_tile * w_tile[:, None], axis=0)
 
     # Final normalization
     out = a_acc / tl.maximum(Lg, 1e-20)
@@ -534,20 +551,11 @@ def flash_decoding(
     k = k.contiguous()
     v = v.contiguous()
 
-    num_kv_split = NUM_KV_SPLIT
+    num_kv_split = pick_split(batch_size, n_heads, kv_seq_len)
 
-    m = torch.empty(
-        (batch_size, n_heads, num_kv_split),
-        device=q.device, dtype=torch.float32
-    )
-    l = torch.empty(
-        (batch_size, n_heads, num_kv_split),
-        device=q.device, dtype=torch.float32
-    )
-    a = torch.empty(
-        (batch_size, n_heads, num_kv_split, d_heads),
-        device=q.device, dtype=torch.float32
-    )
+    m = torch.empty((batch_size, n_heads, num_kv_split), device=q.device, dtype=torch.float32)
+    l = torch.empty((batch_size, n_heads, num_kv_split), device=q.device, dtype=torch.bfloat16)
+    a = torch.empty((batch_size, n_heads, num_kv_split, d_heads), device=q.device, dtype=torch.bfloat16)
     o = torch.empty_like(q)
 
     # PASS 1
@@ -562,13 +570,13 @@ def flash_decoding(
         l.stride(0), l.stride(1), l.stride(2),
         a.stride(0), a.stride(1), a.stride(2), a.stride(3),
         batch_size, n_heads, kv_seq_len, d_heads,
-        NUM_KV_SPLIT,
+        num_kv_split,
         #BLOCK_T=BLOCK_T, BLOCK_D=BLOCK_D,
         #num_warps=NUM_WARPS, num_stages=NUM_STAGES
     )
 
     # PASS 2
-    grid2 = (batch_size * n_heads, )
+    grid2 = lambda META: (batch_size * n_heads, triton.cdiv(d_heads, META['BLOCK_D']))
     flash_decoding_pass2[grid2](
         m, l, a,
         o,
@@ -577,8 +585,8 @@ def flash_decoding(
         a.stride(0), a.stride(1), a.stride(2), a.stride(3),
         o.stride(0), o.stride(1), o.stride(2), o.stride(3),
         batch_size, n_heads, num_kv_split, d_heads,
-        #BLOCK_D=BLOCK_D,
-        #num_warps=NUM_WARPS, num_stages=NUM_STAGES
+        # BLOCK_D=BLOCK_D, BLOCK_P=BLOCK_P
+        # num_warps=NUM_WARPS, num_stages=NUM_STAGES
     )
     return o
 
@@ -607,20 +615,11 @@ def flash_decoding_2(
     k = k.contiguous()
     v = v.contiguous()
 
-    num_kv_split = NUM_KV_SPLIT
+    num_kv_split = pick_split(batch_size, n_heads, kv_seq_len)
 
-    m = torch.empty(
-        (batch_size, n_heads, num_kv_split),
-        device=q.device, dtype=torch.float32
-    )
-    l = torch.empty(
-        (batch_size, n_heads, num_kv_split),
-        device=q.device, dtype=torch.float32
-    )
-    a = torch.empty(
-        (batch_size, n_heads, num_kv_split, d_heads),
-        device=q.device, dtype=torch.float32
-    )
+    m = torch.empty((batch_size, n_heads, num_kv_split), device=q.device, dtype=torch.float32)
+    l = torch.empty((batch_size, n_heads, num_kv_split), device=q.device, dtype=torch.bfloat16)
+    a = torch.empty((batch_size, n_heads, num_kv_split, d_heads), device=q.device, dtype=torch.bfloat16)
     o = torch.empty_like(q)
 
     # PASS 1
@@ -636,13 +635,13 @@ def flash_decoding_2(
         a.stride(0), a.stride(1), a.stride(2), a.stride(3),
         batch_size, n_heads, kv_seq_len, d_heads,
         fix_max,
-        NUM_KV_SPLIT,
+        num_kv_split,
         #BLOCK_T=BLOCK_T, BLOCK_D=BLOCK_D,
         #num_warps=NUM_WARPS, num_stages=NUM_STAGES
     )
 
     # PASS 2
-    grid2 = (batch_size * n_heads,)
+    grid2 = lambda META: (batch_size * n_heads, triton.cdiv(d_heads, META['BLOCK_D']))
     flash_decoding_pass2[grid2](
         m, l, a,
         o,
@@ -651,10 +650,23 @@ def flash_decoding_2(
         a.stride(0), a.stride(1), a.stride(2), a.stride(3),
         o.stride(0), o.stride(1), o.stride(2), o.stride(3),
         batch_size, n_heads, num_kv_split, d_heads,
-        #BLOCK_D=BLOCK_D,
+        #BLOCK_D=BLOCK_D, BLOCK_P=BLOCK_P
         #num_warps=NUM_WARPS, num_stages=NUM_STAGES
     )
     return o
+
+def pick_split(B: int, H: int, T: int) -> int:
+    par = B * H
+    # 이미 병렬도 크거나 T 짧으면 분할 금지
+    if T <= 8192 or par >= 256:
+        return 1
+    # 중간 컨텍스트
+    if T <= 32768:
+        return 2 if par < 64 else 1
+    if T <= 131072:
+        return 4 if par < 64 else 2
+    # 초장문
+    return 8 if par < 64 else 4
 
 
 def naive_attention(q, k, v):
@@ -752,7 +764,7 @@ def benchmark(
                 for name, exec_time, output in results:
                     if exec_time and exec_time > 0:
                         speedup_val = (baseline_time / exec_time) if baseline_time else float('inf')
-                        throughput_val = batch_size / exec_time
+                        throughput_val = (batch_size / (exec_time/1000.0))
                     else:
                         speedup_val = float('inf')
                         throughput_val = float('inf')
@@ -770,7 +782,7 @@ def benchmark(
                     except Exception as e:
                         accuracy = f"\033[91m ⚠️ {str(e).split(':')[0]}\033[0m"
 
-                    print(f"| \033[96m{name:<20}\033[0m | {exec_time * 1000:>10.2f} | {speedup:>8} | {throughput:>12} | {accuracy:<12} |")
+                    print(f"| \033[96m{name:<20}\033[0m | {exec_time:>10.2f} | {speedup:>8} | {throughput:>12} | {accuracy:<12} |")
 
                 print(f"|{'-' * 22}|{'-' * 12}|{'-' * 10}|{'-' * 14}|{'-' * 14}|")
 
@@ -824,8 +836,8 @@ def main():
         {"batch_size": 64, "n_heads": 12, "d_head": 64, "kv_seq_len": 1024},
         {"batch_size": 64, "n_heads": 12, "d_head": 64, "kv_seq_len": 8192},
         # Long Context
+        {"batch_size": 1, "n_heads": 12, "d_head": 64, "kv_seq_len": 131072},
         {"batch_size": 4, "n_heads": 12, "d_head": 64, "kv_seq_len": 131072},
-        {"batch_size": 16, "n_heads": 12, "d_head": 64, "kv_seq_len": 131072},
     ]
     algorithms = [
         ("Naive Attention", naive_attention),
