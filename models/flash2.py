@@ -6,50 +6,32 @@ import triton
 import triton.language as tl
 from triton.runtime import driver
 from src.utils import set_seed
-BLOCK_T = 128
-BLOCK_D = 128
 NUM_KV_SPLIT = 8
-NUM_WARPS = 8
-NUM_STAGES = 3
 
 FLASH_ATTN_CONFIGS = [
-    triton.Config({'BLOCK_T': 64,  'BLOCK_D': 128}, num_warps=4, num_stages=2),
-    triton.Config({'BLOCK_T': 64,  'BLOCK_D': 128}, num_warps=8, num_stages=2),
-    triton.Config({'BLOCK_T': 64,  'BLOCK_D': 128}, num_warps=4, num_stages=3),
-    triton.Config({'BLOCK_T': 64,  'BLOCK_D': 128}, num_warps=8, num_stages=3),
-    triton.Config({'BLOCK_T': 128, 'BLOCK_D': 128}, num_warps=4, num_stages=2),
-    triton.Config({'BLOCK_T': 128, 'BLOCK_D': 128}, num_warps=8, num_stages=2),
-    triton.Config({'BLOCK_T': 128, 'BLOCK_D': 128}, num_warps=4, num_stages=3),
-    triton.Config({'BLOCK_T': 128, 'BLOCK_D': 128}, num_warps=8, num_stages=3),
-    triton.Config({'BLOCK_T': 256, 'BLOCK_D': 128}, num_warps=4, num_stages=2),
-    triton.Config({'BLOCK_T': 256, 'BLOCK_D': 128}, num_warps=8, num_stages=2),
-    triton.Config({'BLOCK_T': 256, 'BLOCK_D': 128}, num_warps=4, num_stages=3),
-    triton.Config({'BLOCK_T': 256, 'BLOCK_D': 128}, num_warps=8, num_stages=3),
+    triton.Config({'BLOCK_T': 64,  'BLOCK_D': 64},  num_warps=4, num_stages=2),
+    triton.Config({'BLOCK_T': 64,  'BLOCK_D': 64},  num_warps=8, num_stages=3),
+    triton.Config({'BLOCK_T': 128, 'BLOCK_D': 64},  num_warps=4, num_stages=2),
+    triton.Config({'BLOCK_T': 128, 'BLOCK_D': 64},  num_warps=8, num_stages=3),
+    triton.Config({'BLOCK_T': 256, 'BLOCK_D': 64},  num_warps=4, num_stages=2),
+    triton.Config({'BLOCK_T': 256, 'BLOCK_D': 64},  num_warps=8, num_stages=3),
 ]
 FLASH_DECODING_PASS1_CONFIGS = [
-    triton.Config({'BLOCK_T': 64,  'BLOCK_D': 128}, num_warps=4, num_stages=2),
-    triton.Config({'BLOCK_T': 64,  'BLOCK_D': 128}, num_warps=8, num_stages=2),
-    triton.Config({'BLOCK_T': 64,  'BLOCK_D': 128}, num_warps=4, num_stages=3),
-    triton.Config({'BLOCK_T': 64,  'BLOCK_D': 128}, num_warps=8, num_stages=3),
-    triton.Config({'BLOCK_T': 128, 'BLOCK_D': 128}, num_warps=4, num_stages=2),
-    triton.Config({'BLOCK_T': 128, 'BLOCK_D': 128}, num_warps=8, num_stages=2),
-    triton.Config({'BLOCK_T': 128, 'BLOCK_D': 128}, num_warps=4, num_stages=3),
-    triton.Config({'BLOCK_T': 128, 'BLOCK_D': 128}, num_warps=8, num_stages=3),
-    triton.Config({'BLOCK_T': 256, 'BLOCK_D': 128}, num_warps=4, num_stages=2),
-    triton.Config({'BLOCK_T': 256, 'BLOCK_D': 128}, num_warps=8, num_stages=2),
-    triton.Config({'BLOCK_T': 256, 'BLOCK_D': 128}, num_warps=4, num_stages=3),
-    triton.Config({'BLOCK_T': 256, 'BLOCK_D': 128}, num_warps=8, num_stages=3),
+    triton.Config({'BLOCK_T': 64,  'BLOCK_D': 64},  num_warps=4, num_stages=2),
+    triton.Config({'BLOCK_T': 64,  'BLOCK_D': 64},  num_warps=8, num_stages=3),
+    triton.Config({'BLOCK_T': 128, 'BLOCK_D': 64},  num_warps=4, num_stages=2),
+    triton.Config({'BLOCK_T': 128, 'BLOCK_D': 64},  num_warps=8, num_stages=3),
+    triton.Config({'BLOCK_T': 256, 'BLOCK_D': 64},  num_warps=4, num_stages=2),
+    triton.Config({'BLOCK_T': 256, 'BLOCK_D': 64},  num_warps=8, num_stages=3),
 ]
 FLASH_DECODING_PASS2_CONFIGS = [
-    triton.Config({'BLOCK_D': 128}, num_warps=4, num_stages=2),
-    triton.Config({'BLOCK_D': 128}, num_warps=8, num_stages=2),
-    triton.Config({'BLOCK_D': 128}, num_warps=4, num_stages=3),
-    triton.Config({'BLOCK_D': 128}, num_warps=8, num_stages=3),
+    triton.Config({'BLOCK_D': 64}, num_warps=4, num_stages=2),
+    triton.Config({'BLOCK_D': 64}, num_warps=8, num_stages=3),
 ]
 
 
 # FLASH ATTENTION 2
-@triton.autotune(configs=FLASH_ATTN_CONFIGS, key=['T','D'])
+@triton.autotune(configs=FLASH_ATTN_CONFIGS, key=['T'])
 @triton.jit
 def flash_attn_2_kernel(
     Q,     # [B, H, 1, D] (bf16)
@@ -60,7 +42,6 @@ def flash_attn_2_kernel(
     stride_v_b, stride_v_h, stride_v_t, stride_v_d,
     stride_o_b, stride_o_h, stride_o_t, stride_o_d,
     B, H, T, D,
-    N_BLOCKS: tl.constexpr,
     BLOCK_T: tl.constexpr, BLOCK_D: tl.constexpr
 ):
     # Program IDs
@@ -92,7 +73,7 @@ def flash_attn_2_kernel(
     acc       = tl.zeros([BLOCK_D], dtype=tl.float32)
 
     # Loop over K, V blocks along T
-    for b in range(0, N_BLOCKS):
+    for b in range(0, tl.cdiv(T, BLOCK_T)):
         start_n = b * BLOCK_T
         t_idx = start_n + offs_t  # [BLOCK_T]
         mask_t = t_idx < T        # [BLOCK_T]
@@ -158,7 +139,6 @@ def flash_attn_2(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Ten
     o = torch.empty_like(q)
 
     grid = (batch_size * n_heads, )
-    num_blocks = triton.cdiv(kv_seq_len, BLOCK_T)
     flash_attn_2_kernel[grid](
         q, k, v, o,
         q.stride(0), q.stride(1), q.stride(2), q.stride(3),
@@ -166,7 +146,6 @@ def flash_attn_2(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Ten
         v.stride(0), v.stride(1), v.stride(2), v.stride(3),
         o.stride(0), o.stride(1), o.stride(2), o.stride(3),
         batch_size, n_heads, kv_seq_len, d_heads,
-        N_BLOCKS=num_blocks,
         #BLOCK_T=BLOCK_T, BLOCK_D=BLOCK_D,
         #num_warps=NUM_WARPS, num_stages=NUM_STAGES
     )
@@ -174,7 +153,7 @@ def flash_attn_2(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Ten
 
 
 # FLASH ATTENTION 2 (FIX-MAX)
-@triton.autotune(configs=FLASH_ATTN_CONFIGS, key=['T','D'])
+@triton.autotune(configs=FLASH_ATTN_CONFIGS, key=['T'])
 @triton.jit
 def flash_attn_2_fixmax_kernel(
     Q,      # [B, H, 1, D] (bf16)
@@ -186,7 +165,6 @@ def flash_attn_2_fixmax_kernel(
     stride_o_b, stride_o_h, stride_o_t, stride_o_d,
     B, H, T, D,
     FIXMAX: tl.constexpr,
-    N_BLOCKS: tl.constexpr,
     BLOCK_T: tl.constexpr, BLOCK_D: tl.constexpr
 ):
     # Program IDs
@@ -220,7 +198,7 @@ def flash_attn_2_fixmax_kernel(
     fixmax = tl.full((), FIXMAX, dtype=tl.float32)
 
     # Loop over K, V blocks along T
-    for b in range(0, N_BLOCKS):
+    for b in range(0, tl.cdiv(T, BLOCK_T)):
         start_n = b * BLOCK_T
         t_idx = start_n + offs_t  # [BLOCK_T]
         mask_t = t_idx < T        # [BLOCK_T]
@@ -281,7 +259,6 @@ def flash_attn_2_fixmax(
     o = torch.empty_like(q)
 
     grid = (batch_size * n_heads, )
-    num_blocks = triton.cdiv(kv_seq_len, BLOCK_T)
     flash_attn_2_fixmax_kernel[grid](
         q, k, v, o,
         q.stride(0), q.stride(1), q.stride(2), q.stride(3),
@@ -290,7 +267,6 @@ def flash_attn_2_fixmax(
         o.stride(0), o.stride(1), o.stride(2), o.stride(3),
         batch_size, n_heads, kv_seq_len, d_heads,
         fixmax,
-        N_BLOCKS=num_blocks,
         #BLOCK_T=BLOCK_T, BLOCK_D=BLOCK_D,
         #num_warps=NUM_WARPS, num_stages=NUM_STAGES
     )
@@ -298,7 +274,7 @@ def flash_attn_2_fixmax(
 
 
 # FLASH DECODING
-@triton.autotune(configs=FLASH_DECODING_PASS1_CONFIGS, key=['T','D'])
+@triton.autotune(configs=FLASH_DECODING_PASS1_CONFIGS, key=['T'])
 @triton.jit
 def flash_decoding_pass1(
     Q,     # [B, H, 1, D] (bf16)
@@ -314,7 +290,6 @@ def flash_decoding_pass1(
     stride_a_b, stride_a_h, stride_a_p, stride_a_d,
     B, H, T, D,
     T_PART: tl.constexpr,    # ceil_div(T, P)
-    N_BLOCKS: tl.constexpr,  # ceil_div(T_PART, BLOCK_T)
     BLOCK_T: tl.constexpr, BLOCK_D: tl.constexpr,
 ):
     # Program IDs
@@ -351,7 +326,7 @@ def flash_decoding_pass1(
     acc       = tl.zeros([BLOCK_D], dtype=tl.float32)
 
     # Loop over K, V blocks along T-partition
-    for b in range(0, N_BLOCKS):
+    for b in range(0, tl.cdiv(T, BLOCK_T)):
         tile_t = t_start + b * BLOCK_T + offs_t
         mask_t = (tile_t < t_end) & (~is_empty)
 
@@ -393,7 +368,7 @@ def flash_decoding_pass1(
     tl.store(l_ptr, tl.where(is_empty, 0.0,     sum_exp))
     tl.store(a_ptr, tl.where(offs_d < D, tl.where(is_empty, 0.0, acc), 0.0))
 
-@triton.autotune(configs=FLASH_DECODING_PASS1_CONFIGS, key=['T','D'])
+@triton.autotune(configs=FLASH_DECODING_PASS1_CONFIGS, key=['T'])
 @triton.jit
 def flash_decoding_2_pass1(
     Q,      # [B, H, 1, D] (bf16)
@@ -410,7 +385,6 @@ def flash_decoding_2_pass1(
     B, H, T, D,
     FIXMAX: tl.constexpr,  # partition-wise fixed max
     T_PART: tl.constexpr,
-    N_BLOCKS: tl.constexpr,
     BLOCK_T: tl.constexpr, BLOCK_D: tl.constexpr,
 ):
     # Program IDs
@@ -447,8 +421,8 @@ def flash_decoding_2_pass1(
     acc        = tl.zeros([BLOCK_D], dtype=tl.float32)
 
     # Loop over K, V blocks along T-partition
-    for bidx in range(0, N_BLOCKS):
-        tile_t = t_start + bidx*BLOCK_T + offs_t
+    for b in range(0, tl.cdiv(T, BLOCK_T)):
+        tile_t = t_start + b * BLOCK_T + offs_t
         mask_t = (tile_t < t_end) & (~is_empty)
 
         # Pointers
@@ -480,7 +454,7 @@ def flash_decoding_2_pass1(
     tl.store(l_ptr, tl.where(is_empty, 0.0, sum_exp))  # l = sum exp(score - mfix)
     tl.store(a_ptr, tl.where(offs_d < D, tl.where(is_empty, 0.0, acc), 0.0))
 
-@triton.autotune(configs=FLASH_DECODING_PASS2_CONFIGS, key=['D'])
+@triton.autotune(configs=FLASH_DECODING_PASS2_CONFIGS, key=[])
 @triton.jit
 def flash_decoding_pass2(
     M, L, A,  # partials
@@ -521,7 +495,7 @@ def flash_decoding_pass2(
     a_acc  = tl.zeros([BLOCK_D], dtype=tl.float32)
 
     # static loop
-    for p in tl.static_range(0, P):
+    for p in range(0, P):
         a_ptrs = a_base + p * stride_a_p + offs_d * stride_a_d
         a_i = tl.load(a_ptrs, mask=offs_d < D, other=0.0)   # [BLOCK_D]
         m_ip = tl.load(m_base + p * stride_m_p)
@@ -575,7 +549,6 @@ def flash_decoding(
     o = torch.empty_like(q)
 
     t_part = triton.cdiv(kv_seq_len, num_kv_split)
-    num_blocks = triton.cdiv(t_part, BLOCK_T)
 
     # PASS 1
     grid1 = (batch_size * n_heads, num_kv_split)
@@ -590,7 +563,6 @@ def flash_decoding(
         a.stride(0), a.stride(1), a.stride(2), a.stride(3),
         batch_size, n_heads, kv_seq_len, d_heads,
         T_PART=t_part,
-        N_BLOCKS=num_blocks,
         #BLOCK_T=BLOCK_T, BLOCK_D=BLOCK_D,
         #num_warps=NUM_WARPS, num_stages=NUM_STAGES
     )
@@ -652,7 +624,6 @@ def flash_decoding_2(
     o = torch.empty_like(q)
 
     t_part = triton.cdiv(kv_seq_len, num_kv_split)
-    num_blocks = triton.cdiv(t_part, BLOCK_T)
 
     # PASS 1
     grid1 = (batch_size * n_heads, num_kv_split)
@@ -668,7 +639,6 @@ def flash_decoding_2(
         batch_size, n_heads, kv_seq_len, d_heads,
         fix_max,
         T_PART=t_part,
-        N_BLOCKS=num_blocks,
         #BLOCK_T=BLOCK_T, BLOCK_D=BLOCK_D,
         #num_warps=NUM_WARPS, num_stages=NUM_STAGES
     )
@@ -829,26 +799,27 @@ def main():
           f"Warp size: {warp_size}")
     set_seed(42)
 
-    # batch_sizes = [1, 4, 32]
-    # n_heads     = [12, 16, 16, 24]
-    # d_heads     = [64, 64, 96, 128]
-    # kv_seq_lens = [1024, 2048, 4096, 8192]
+    # batch_sizes = [1, 4, 16, 64]
+    # n_heads     = 12
+    # d_heads     = 64
+    # kv_seq_lens = 256, 1024, 8192, 131072
     test_configs = [
         # Single batch
+        {"batch_size": 1, "n_heads": 12, "d_head": 64, "kv_seq_len": 256},
         {"batch_size": 1, "n_heads": 12, "d_head": 64, "kv_seq_len": 1024},
-        {"batch_size": 1, "n_heads": 16, "d_head": 64, "kv_seq_len": 2048},
-        {"batch_size": 1, "n_heads": 16, "d_head": 96, "kv_seq_len": 4096},
-        {"batch_size": 1, "n_heads": 24, "d_head": 128, "kv_seq_len": 8192},
+        {"batch_size": 1, "n_heads": 12, "d_head": 64, "kv_seq_len": 8192},
         # Small batch
+        {"batch_size": 4, "n_heads": 12, "d_head": 64, "kv_seq_len": 256},
         {"batch_size": 4, "n_heads": 12, "d_head": 64, "kv_seq_len": 1024},
-        {"batch_size": 4, "n_heads": 16, "d_head": 64, "kv_seq_len": 2048},
-        {"batch_size": 4, "n_heads": 16, "d_head": 96, "kv_seq_len": 4096},
-        {"batch_size": 4, "n_heads": 24, "d_head": 128, "kv_seq_len": 8192},
-        # Large batch
+        {"batch_size": 4, "n_heads": 12, "d_head": 64, "kv_seq_len": 8192},
+        # Medium batch
+        {"batch_size": 16, "n_heads": 12, "d_head": 64, "kv_seq_len": 256},
         {"batch_size": 16, "n_heads": 12, "d_head": 64, "kv_seq_len": 1024},
-        {"batch_size": 16, "n_heads": 16, "d_head": 64, "kv_seq_len": 2048},
-        {"batch_size": 16, "n_heads": 16, "d_head": 86, "kv_seq_len": 4096},
-        {"batch_size": 16, "n_heads": 24, "d_head": 128, "kv_seq_len": 8192},
+        {"batch_size": 16, "n_heads": 12, "d_head": 64, "kv_seq_len": 8192},
+        # Large batch
+        {"batch_size": 64, "n_heads": 12, "d_head": 64, "kv_seq_len": 256},
+        {"batch_size": 64, "n_heads": 12, "d_head": 64, "kv_seq_len": 1024},
+        {"batch_size": 64, "n_heads": 12, "d_head": 64, "kv_seq_len": 8192},
         # Long Context
         {"batch_size": 1, "n_heads": 12, "d_head": 64, "kv_seq_len": 131072},
         {"batch_size": 2, "n_heads": 12, "d_head": 64, "kv_seq_len": 131072},
