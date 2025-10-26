@@ -1,4 +1,3 @@
-import time
 import math
 import torch
 import torch.nn.functional as F
@@ -6,27 +5,28 @@ import triton
 import triton.language as tl
 from triton.runtime import driver
 from src.utils import set_seed
-NUM_KV_SPLIT = 8
 
+NUM_KV_SPLIT = 16
 FLASH_ATTN_CONFIGS = [
-    triton.Config({'BLOCK_T': 64,  'BLOCK_D': 64},  num_warps=4, num_stages=2),
-    triton.Config({'BLOCK_T': 64,  'BLOCK_D': 64},  num_warps=8, num_stages=3),
-    triton.Config({'BLOCK_T': 128, 'BLOCK_D': 64},  num_warps=4, num_stages=2),
-    triton.Config({'BLOCK_T': 128, 'BLOCK_D': 64},  num_warps=8, num_stages=3),
     triton.Config({'BLOCK_T': 256, 'BLOCK_D': 64},  num_warps=4, num_stages=2),
     triton.Config({'BLOCK_T': 256, 'BLOCK_D': 64},  num_warps=8, num_stages=3),
+    triton.Config({'BLOCK_T': 256, 'BLOCK_D': 64},  num_warps=8, num_stages=4),
+    triton.Config({'BLOCK_T': 512, 'BLOCK_D': 64},  num_warps=4, num_stages=2),
+    triton.Config({'BLOCK_T': 512, 'BLOCK_D': 64},  num_warps=8, num_stages=3),
+    triton.Config({'BLOCK_T': 512, 'BLOCK_D': 64},  num_warps=8, num_stages=4),
 ]
 FLASH_DECODING_PASS1_CONFIGS = [
-    triton.Config({'BLOCK_T': 64,  'BLOCK_D': 64},  num_warps=4, num_stages=2),
-    triton.Config({'BLOCK_T': 64,  'BLOCK_D': 64},  num_warps=8, num_stages=3),
-    triton.Config({'BLOCK_T': 128, 'BLOCK_D': 64},  num_warps=4, num_stages=2),
-    triton.Config({'BLOCK_T': 128, 'BLOCK_D': 64},  num_warps=8, num_stages=3),
     triton.Config({'BLOCK_T': 256, 'BLOCK_D': 64},  num_warps=4, num_stages=2),
     triton.Config({'BLOCK_T': 256, 'BLOCK_D': 64},  num_warps=8, num_stages=3),
+    triton.Config({'BLOCK_T': 256, 'BLOCK_D': 64},  num_warps=8, num_stages=4),
+    triton.Config({'BLOCK_T': 512, 'BLOCK_D': 64},  num_warps=4, num_stages=2),
+    triton.Config({'BLOCK_T': 512, 'BLOCK_D': 64},  num_warps=8, num_stages=3),
+    triton.Config({'BLOCK_T': 512, 'BLOCK_D': 64},  num_warps=8, num_stages=4),
 ]
 FLASH_DECODING_PASS2_CONFIGS = [
     triton.Config({'BLOCK_D': 64}, num_warps=4, num_stages=2),
     triton.Config({'BLOCK_D': 64}, num_warps=8, num_stages=3),
+    triton.Config({'BLOCK_D': 64}, num_warps=8, num_stages=4),
 ]
 
 
@@ -289,7 +289,7 @@ def flash_decoding_pass1(
     stride_l_b, stride_l_h, stride_l_p,
     stride_a_b, stride_a_h, stride_a_p, stride_a_d,
     B, H, T, D,
-    T_PART: tl.constexpr,    # ceil_div(T, P)
+    P: tl.constexpr,
     BLOCK_T: tl.constexpr, BLOCK_D: tl.constexpr,
 ):
     # Program IDs
@@ -311,6 +311,7 @@ def flash_decoding_pass1(
     q = tl.load(q_ptrs, mask=offs_d < D, other=0.0).to(tl.float32)  # [BLOCK_D]
 
     # partition bounds
+    T_PART = (T + P - 1) // P
     t_start  = pid_p * T_PART
     t_end    = tl.minimum(t_start + T_PART, T)
     is_empty = t_start >= T
@@ -373,8 +374,8 @@ def flash_decoding_pass1(
 def flash_decoding_2_pass1(
     Q,      # [B, H, 1, D] (bf16)
     K, V,   # [B, H, T, D] (bf16)
-    M,      # [B, H, P] (fp32)    partition max
-    L,      # [B, H, P] (fp32)    partition sum-exp
+    M,      # [B, H, P]    (fp32)    partition max
+    L,      # [B, H, P]    (fp32)    partition sum-exp
     A,      # [B, H, P, D] (fp32) partition accumulator over D
     stride_q_b, stride_q_h, stride_q_t, stride_q_d,
     stride_k_b, stride_k_h, stride_k_t, stride_k_d,
@@ -384,7 +385,7 @@ def flash_decoding_2_pass1(
     stride_a_b, stride_a_h, stride_a_p, stride_a_d,
     B, H, T, D,
     FIXMAX: tl.constexpr,  # partition-wise fixed max
-    T_PART: tl.constexpr,
+    P: tl.constexpr,
     BLOCK_T: tl.constexpr, BLOCK_D: tl.constexpr,
 ):
     # Program IDs
@@ -406,6 +407,7 @@ def flash_decoding_2_pass1(
     q = tl.load(q_ptrs, mask=offs_d < D, other=0.0).to(tl.float32)
 
     # partition bounds
+    T_PART = (T + P - 1) // P
     t_start  = pid_p * T_PART
     t_end    = tl.minimum(t_start + T_PART, T)
     is_empty = t_start >= T
@@ -548,8 +550,6 @@ def flash_decoding(
     )
     o = torch.empty_like(q)
 
-    t_part = triton.cdiv(kv_seq_len, num_kv_split)
-
     # PASS 1
     grid1 = (batch_size * n_heads, num_kv_split)
     flash_decoding_pass1[grid1](
@@ -562,7 +562,7 @@ def flash_decoding(
         l.stride(0), l.stride(1), l.stride(2),
         a.stride(0), a.stride(1), a.stride(2), a.stride(3),
         batch_size, n_heads, kv_seq_len, d_heads,
-        T_PART=t_part,
+        NUM_KV_SPLIT,
         #BLOCK_T=BLOCK_T, BLOCK_D=BLOCK_D,
         #num_warps=NUM_WARPS, num_stages=NUM_STAGES
     )
@@ -623,8 +623,6 @@ def flash_decoding_2(
     )
     o = torch.empty_like(q)
 
-    t_part = triton.cdiv(kv_seq_len, num_kv_split)
-
     # PASS 1
     grid1 = (batch_size * n_heads, num_kv_split)
     flash_decoding_2_pass1[grid1](
@@ -638,7 +636,7 @@ def flash_decoding_2(
         a.stride(0), a.stride(1), a.stride(2), a.stride(3),
         batch_size, n_heads, kv_seq_len, d_heads,
         fix_max,
-        T_PART=t_part,
+        NUM_KV_SPLIT,
         #BLOCK_T=BLOCK_T, BLOCK_D=BLOCK_D,
         #num_warps=NUM_WARPS, num_stages=NUM_STAGES
     )
@@ -666,6 +664,8 @@ def naive_attention(q, k, v):
     attn_out = torch.matmul(attn_prob, v)
     return attn_out
 
+def torch_flash_attn(q, k, v):
+    return F.scaled_dot_product_attention(q, k, v)
 
 def estimate_memory(batch_size: int, n_heads: int, kv_seq_len: int, d_head: int, dtype: torch.dtype):
     if dtype == torch.float16 or dtype == torch.bfloat16:
@@ -684,21 +684,24 @@ def speedometer(fn, *args, num_warmups: int, num_runs: int):
     for _ in range(num_warmups):
         _ = fn(*args)
 
-    torch.cuda.synchronize()
-    start_time = time.time()
+    start = torch.cuda.Event(enable_timing=True)
+    end = torch.cuda.Event(enable_timing=True)
 
+    torch.cuda.synchronize()
+    start.record()
     for _ in range(num_runs):
         output = fn(*args)
-
+    end.record()
     torch.cuda.synchronize()
-    end_time = time.time()
 
-    return (end_time - start_time) / num_runs, output
+    elapsed_ms = start.elapsed_time(end)
+
+    return elapsed_ms / num_runs, output
 
 def benchmark(
     configs, algorithms,
     device: torch.device, dtype: torch.dtype, vram_size: int,
-    num_warmup: int = 5, num_run: int = 10,
+    num_warmup: int = 10, num_run: int = 20,
     rtol: float = 1e-2, atol: float = 1e-2
 ):
     print("\n\033[95m" + "═" * 75)
@@ -749,7 +752,7 @@ def benchmark(
                 for name, exec_time, output in results:
                     if exec_time and exec_time > 0:
                         speedup_val = (baseline_time / exec_time) if baseline_time else float('inf')
-                        throughput_val = batch_size / exec_time / 1e3
+                        throughput_val = batch_size / exec_time
                     else:
                         speedup_val = float('inf')
                         throughput_val = float('inf')
@@ -785,7 +788,7 @@ def benchmark(
 def main():
     device = torch.device("cuda")
     torch.set_float32_matmul_precision("high")
-    dtype = torch.float32
+    dtype = torch.bfloat16
     properties = driver.active.utils.get_device_properties(driver.active.get_current_device())
     num_sm = properties["multiprocessor_count"]
     num_regs = properties["max_num_regs"]
@@ -821,15 +824,17 @@ def main():
         {"batch_size": 64, "n_heads": 12, "d_head": 64, "kv_seq_len": 1024},
         {"batch_size": 64, "n_heads": 12, "d_head": 64, "kv_seq_len": 8192},
         # Long Context
-        {"batch_size": 1, "n_heads": 12, "d_head": 64, "kv_seq_len": 131072},
-        {"batch_size": 2, "n_heads": 12, "d_head": 64, "kv_seq_len": 131072},
+        {"batch_size": 4, "n_heads": 12, "d_head": 64, "kv_seq_len": 131072},
+        {"batch_size": 16, "n_heads": 12, "d_head": 64, "kv_seq_len": 131072},
     ]
     algorithms = [
         ("Naive Attention", naive_attention),
-        # ("Flash Attention (Triton)", flash_attn_1),
-        ("FA2", F.scaled_dot_product_attention),
-        ("FA2 (Triton)", flash_attn_2),
-        ("FA2 + fix-max", flash_attn_2_fixmax),
+        #("FA", flash_attn_1),
+        # FLASH ATTENTION 2
+        #("FA2 (Torch)", torch_flash_attn),
+        ("FA2", flash_attn_2),
+        #("FA2 + fix-max", flash_attn_2_fixmax),
+        # FLASH DECODING
         ("Flash Decoding", flash_decoding),
         ("Flash Decoding 2",flash_decoding_2),
     ]
