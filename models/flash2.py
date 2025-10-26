@@ -290,8 +290,8 @@ def flash_decoding_pass1(
     off_b  = pid_hb // H
 
     # Offsets
-    offs_d = tl.arange(0, BLOCK_D)
     offs_t = tl.arange(0, BLOCK_T)
+    offs_d = tl.arange(0, BLOCK_D)
 
     # Pointers
     q_ptrs = Q + off_b * stride_q_b + off_h * stride_q_h + 0 * stride_q_t + offs_d * stride_q_d
@@ -317,15 +317,15 @@ def flash_decoding_pass1(
     acc       = tl.zeros([BLOCK_D], dtype=tl.float32)
 
     # Loop over K, V blocks along T-partition
-    for bidx in range(0, N_BLOCKS):
-        tile_t = t_start + bidx*BLOCK_T + offs_t
+    for b in range(0, N_BLOCKS):
+        tile_t = t_start + b * BLOCK_T + offs_t
         mask_t = (tile_t < t_end) & (~is_empty)
 
         # Pointers
         k_ptrs = k_base + tile_t[:, None]*stride_k_t + offs_d[None, :]*stride_k_d
         v_ptrs = v_base + tile_t[:, None]*stride_v_t + offs_d[None, :]*stride_v_d
 
-        # Load K, V blocks (bf16)
+        # Load K, V blocks
         kv_mask = mask_t[:, None] & (offs_d[None, :] < D)
         k = tl.load(k_ptrs, mask=kv_mask, other=0.0).to(tl.float32)  # [BLOCK_T, BLOCK_D]
         v = tl.load(v_ptrs, mask=kv_mask, other=0.0).to(tl.float32)  # [BLOCK_T, BLOCK_D]
@@ -362,9 +362,12 @@ def flash_decoding_pass1(
 
 @triton.jit
 def flash_decoding_pass1_fixed(
-    Q, K, V,
-    MFIX,                 # [B, H, P] (fp32)  partition-wise fixed max (>= true max)
-    M, L, A,              # outputs: same shapes/dtypes as before
+    Q,     # [B, H, 1, D] (bf16)
+    K, V,  # [B, H, T, D] (bf16)
+    FIXMAX,  # [B, H, P] (fp32)  partition-wise fixed max (>= true max)
+    M,     # [B, H, P]    (fp32)  partition max
+    L,     # [B, H, P]    (fp32)  partition sum-exp
+    A,     # [B, H, P, D] (fp32)  partition accumulator over D
     stride_q_b, stride_q_h, stride_q_t, stride_q_d,
     stride_k_b, stride_k_h, stride_k_t, stride_k_d,
     stride_v_b, stride_v_h, stride_v_t, stride_v_d,
@@ -377,20 +380,22 @@ def flash_decoding_pass1_fixed(
     N_BLOCKS: tl.constexpr,
     BLOCK_T: tl.constexpr, BLOCK_D: tl.constexpr,
 ):
+    # Program IDs
     pid_hb = tl.program_id(0)
     pid_p  = tl.program_id(1)
     off_h  = pid_hb % H
     off_b  = pid_hb // H
 
+    # Offsets
     offs_d = tl.arange(0, BLOCK_D)
     offs_t = tl.arange(0, BLOCK_T)
 
-    # q, k, v base ptrs
+    # Pointers
     q_ptrs = Q + off_b*stride_q_b + off_h*stride_q_h + 0*stride_q_t + offs_d*stride_q_d
     k_base = K + off_b*stride_k_b + off_h*stride_k_h
     v_base = V + off_b*stride_v_b + off_h*stride_v_h
 
-    # load query
+    # Load query vector
     q = tl.load(q_ptrs, mask=offs_d < D, other=0.0).to(tl.float32)
 
     # partition bounds
@@ -403,44 +408,44 @@ def flash_decoding_pass1_fixed(
     scale = 1.0 / tl.sqrt(Df)
     neg_inf = tl.full((), -float("inf"), dtype=tl.float32)
 
-    # fixed max (must be >= true max score over this partition)
-    mfix_ptr = MFIX + off_b*stride_mfix_b + off_h*stride_mfix_h + pid_p*stride_mfix_p
-    mfix     = tl.load(mfix_ptr)
-    # 비어있는 파티션이면 mfix는 사용되지 않지만, 안전하게 둡니다.
+    # Fix-max softmax
+    fixmax_ptr = FIXMAX + off_b * stride_mfix_b + off_h * stride_mfix_h + pid_p * stride_mfix_p
+    fixmax     = tl.load(fixmax_ptr)
+    sum_exp    = tl.zeros((), dtype=tl.float32)
+    acc        = tl.zeros([BLOCK_D], dtype=tl.float32)
 
-    sum_exp = tl.zeros((), dtype=tl.float32)
-    acc     = tl.zeros([BLOCK_D], dtype=tl.float32)
-
-    # iterate tiles (no running max/reduction)
+    # Loop over K, V blocks along T-partition
     for bidx in range(0, N_BLOCKS):
         tile_t = t_start + bidx*BLOCK_T + offs_t
         mask_t = (tile_t < t_end) & (~is_empty)
 
+        # Pointers
         k_ptrs = k_base + tile_t[:, None]*stride_k_t + offs_d[None, :]*stride_k_d
         v_ptrs = v_base + tile_t[:, None]*stride_v_t + offs_d[None, :]*stride_v_d
 
+        # Load K, V blocks
         kv_mask = mask_t[:, None] & (offs_d[None, :] < D)
         k = tl.load(k_ptrs, mask=kv_mask, other=0.0).to(tl.float32)  # [BLOCK_T, BLOCK_D]
         v = tl.load(v_ptrs, mask=kv_mask, other=0.0).to(tl.float32)  # [BLOCK_T, BLOCK_D]
 
+        # Compute attention scores: q @ K^T
         scores = tl.sum(k * q[None, :], axis=1) * scale               # [BLOCK_T]
-        # NaN 원천 차단용 치환: 마스킹된 곳은 mfix로
-        safe_scores = tl.where(mask_t, scores, mfix)
+        safe_scores = tl.where(mask_t, scores, fixmax)
 
-        # 확률 (고정 max 사용) — 워프 리덕션 없음
-        probs = tl.exp(safe_scores - mfix)
+        # Probabilities
+        probs = tl.exp(safe_scores - fixmax)
         probs = tl.where(mask_t, probs, 0.0)
 
+        # Update accumulator and sum
         acc     += tl.sum(probs[:, None] * v, axis=0)
         sum_exp += tl.sum(probs, axis=0)
 
-    # 출력 기록 (online softmax과 동일한 형태)
-    m_ptr = M + off_b*stride_m_b + off_h*stride_m_h + pid_p*stride_m_p
-    l_ptr = L + off_b*stride_l_b + off_h*stride_l_h + pid_p*stride_l_p
-    a_ptr = A + off_b*stride_a_b + off_h*stride_a_h + pid_p*stride_a_p + offs_d*stride_a_d
-
-    tl.store(m_ptr, tl.where(is_empty, neg_inf, mfix))          # m = fixed max
-    tl.store(l_ptr, tl.where(is_empty, 0.0,     sum_exp))       # l = sum exp(score - mfix)
+    # Store partition outputs
+    m_ptr = M + off_b * stride_m_b + off_h * stride_m_h + pid_p * stride_m_p
+    l_ptr = L + off_b * stride_l_b + off_h * stride_l_h + pid_p * stride_l_p
+    a_ptr = A + off_b * stride_a_b + off_h * stride_a_h + pid_p * stride_a_p + offs_d * stride_a_d
+    tl.store(m_ptr, tl.where(is_empty, neg_inf, fixmax))  # m = fixed max
+    tl.store(l_ptr, tl.where(is_empty, 0.0, sum_exp))  # l = sum exp(score - mfix)
     tl.store(a_ptr, tl.where(offs_d < D, tl.where(is_empty, 0.0, acc), 0.0))
 
 @triton.jit
