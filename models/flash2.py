@@ -8,9 +8,9 @@ from triton.runtime import driver
 from src.utils import set_seed
 BLOCK_T = 128
 BLOCK_D = 128
-NUM_KV_SPLIT = 16
+NUM_KV_SPLIT = 8
 NUM_WARPS = 8
-NUM_STAGES = 2
+NUM_STAGES = 3
 
 
 def naive_attention(q, k, v):
@@ -148,12 +148,12 @@ def flash_attn_2_fixmax_kernel(
     Q,      # [B, H, 1, D] (bf16)
     K, V,   # [B, H, T, D] (bf16)
     O,      # [B, H, 1, D] (bf16)
-    FIXMAX, # scalar (fp32)
     stride_q_b, stride_q_h, stride_q_t, stride_q_d,
     stride_k_b, stride_k_h, stride_k_t, stride_k_d,
     stride_v_b, stride_v_h, stride_v_t, stride_v_d,
     stride_o_b, stride_o_h, stride_o_t, stride_o_d,
     B, H, T, D,
+    FIXMAX: tl.constexpr,
     N_BLOCKS: tl.constexpr,
     BLOCK_T: tl.constexpr, BLOCK_D: tl.constexpr
 ):
@@ -252,12 +252,12 @@ def flash_attn_2_fixmax(
     num_blocks = triton.cdiv(kv_seq_len, BLOCK_T)
     flash_attn_2_fixmax_kernel[grid](
         q, k, v, o,
-        fixmax,
         q.stride(0), q.stride(1), q.stride(2), q.stride(3),
         k.stride(0), k.stride(1), k.stride(2), k.stride(3),
         v.stride(0), v.stride(1), v.stride(2), v.stride(3),
         o.stride(0), o.stride(1), o.stride(2), o.stride(3),
         batch_size, n_heads, kv_seq_len, d_heads,
+        fixmax,
         N_BLOCKS=num_blocks,
         BLOCK_T=BLOCK_T, BLOCK_D=BLOCK_D,
         num_warps=NUM_WARPS, num_stages=NUM_STAGES
@@ -361,21 +361,20 @@ def flash_decoding_pass1(
 
 
 @triton.jit
-def flash_decoding_pass1_fixed(
-    Q,     # [B, H, 1, D] (bf16)
-    K, V,  # [B, H, T, D] (bf16)
-    FIXMAX,  # [B, H, P] (fp32)  partition-wise fixed max (>= true max)
-    M,     # [B, H, P]    (fp32)  partition max
-    L,     # [B, H, P]    (fp32)  partition sum-exp
-    A,     # [B, H, P, D] (fp32)  partition accumulator over D
+def flash_decoding_2_pass1(
+    Q,      # [B, H, 1, D] (bf16)
+    K, V,   # [B, H, T, D] (bf16)
+    M,      # [B, H, P] (fp32)    partition max
+    L,      # [B, H, P] (fp32)    partition sum-exp
+    A,      # [B, H, P, D] (fp32) partition accumulator over D
     stride_q_b, stride_q_h, stride_q_t, stride_q_d,
     stride_k_b, stride_k_h, stride_k_t, stride_k_d,
     stride_v_b, stride_v_h, stride_v_t, stride_v_d,
-    stride_mfix_b, stride_mfix_h, stride_mfix_p,
     stride_m_b, stride_m_h, stride_m_p,
     stride_l_b, stride_l_h, stride_l_p,
     stride_a_b, stride_a_h, stride_a_p, stride_a_d,
     B, H, T, D,
+    FIXMAX: tl.constexpr,  # partition-wise fixed max
     T_PART: tl.constexpr,
     N_BLOCKS: tl.constexpr,
     BLOCK_T: tl.constexpr, BLOCK_D: tl.constexpr,
@@ -409,8 +408,7 @@ def flash_decoding_pass1_fixed(
     neg_inf = tl.full((), -float("inf"), dtype=tl.float32)
 
     # Fix-max softmax
-    fixmax_ptr = FIXMAX + off_b * stride_mfix_b + off_h * stride_mfix_h + pid_p * stride_mfix_p
-    fixmax     = tl.load(fixmax_ptr)
+    fixmax = tl.full((), FIXMAX, dtype=tl.float32)
     sum_exp    = tl.zeros((), dtype=tl.float32)
     acc        = tl.zeros([BLOCK_D], dtype=tl.float32)
 
@@ -471,6 +469,8 @@ def flash_decoding_pass2(
     # Pointers
     m_ptrs = M + off_b*stride_m_b + off_h*stride_m_h + offs_p*stride_m_p
     l_ptrs = L + off_b*stride_l_b + off_h*stride_l_h + offs_p*stride_l_p
+    m_base = M + off_b * stride_m_b + off_h * stride_m_h
+    a_base = A + off_b * stride_a_b + off_h * stride_a_h
 
     # Load all partition stats
     m_i = tl.load(m_ptrs, mask=offs_p < P, other=-float("inf"))  # [P]
@@ -487,10 +487,10 @@ def flash_decoding_pass2(
 
     # static loop
     for p in tl.static_range(0, P):
-        a_ptrs = A + off_b * stride_a_b + off_h*stride_a_h + p * stride_a_p + offs_d * stride_a_d
+        a_ptrs = a_base + p * stride_a_p + offs_d * stride_a_d
         a_i = tl.load(a_ptrs, mask=offs_d < D, other=0.0)   # [BLOCK_D]
-        m_ip = tl.load(M + off_b * stride_m_b + off_h * stride_m_h + p * stride_m_p)
-        wp   = tl.exp(m_ip - m)
+        m_ip = tl.load(m_base + p * stride_m_p)
+        wp = tl.exp(m_ip - m)
         a_acc += a_i * wp
 
     # Final normalization
@@ -542,6 +542,7 @@ def flash_decoding(
     t_part = triton.cdiv(kv_seq_len, num_kv_split)
     num_blocks = triton.cdiv(t_part, BLOCK_T)
 
+    # PASS 1
     grid1 = (batch_size * n_heads, num_kv_split)
     flash_decoding_pass1[grid1](
         q, k, v,
@@ -559,6 +560,7 @@ def flash_decoding(
         num_warps=NUM_WARPS, num_stages=NUM_STAGES
     )
 
+    # PASS 2
     grid2 = (batch_size * n_heads, )
     flash_decoding_pass2[grid2](
         m, l, a,
@@ -575,61 +577,81 @@ def flash_decoding(
 
 def flash_decoding_2(
     q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
-    kv_split: int = 16,
-    block_t: int = 256,
-    block_d: int = None,
-    num_warps: int = 8,
-    num_stages: int = 3,
-    mfix: torch.Tensor | None = None,
+    fix_max: float = 10,
 ) -> torch.Tensor:
-    assert q.ndim == k.ndim == v.ndim == 4 and q.size(2) == 1
-    B, H, _, D = q.shape
-    T = k.size(2)
-    if block_d is None:
-        block_d = max(D, ((D + 31) // 32) * 32)
-    assert block_d >= D
+    """
+        Flash Decoding 2 Triton Kernel (FIX-MAX SOFTMAX)
 
-    P = max(1, int(kv_split))
-    T_PART   = triton.cdiv(T, P)
-    N_BLOCKS = triton.cdiv(T_PART, block_t)
+        Args:
+            q: Query tensor [batch, n_heads, 1, d_head]
+            k: Key tensor   [batch, n_heads, seq_len_k, d_head]
+            v: Value tensor [batch, n_heads, seq_len_v, d_head]
+            fix_max: scalar
 
-    # mfix 준비 (없으면 상계로 생성; 가장 안전한 건 사전 스캔으로 '진짜 최대값'을 쓰는 것)
+        Returns:
+            o: Output tensor [batch, n_heads, 1, d_head]
+        """
+    _, _, q_len, _ = q.shape
+    batch_size, n_heads, kv_seq_len, d_heads = k.shape
+    assert q.ndim == k.ndim == v.ndim == 4
+    assert q_len == 1
 
-    # workspaces
-    M = torch.empty((B,H,P),    device=q.device, dtype=torch.float32)
-    L = torch.empty((B,H,P),    device=q.device, dtype=torch.float32)
-    A = torch.empty((B,H,P,D),  device=q.device, dtype=torch.float32)
-    O = torch.empty_like(q)
+    q = q.contiguous()
+    k = k.contiguous()
+    v = v.contiguous()
 
-    grid1 = (B*H, P)
-    flash_decoding_pass1_fixed[grid1](
-        q, k, v, mfix, M, L, A,
+    num_kv_split = NUM_KV_SPLIT
+
+    m = torch.empty(
+        (batch_size, n_heads, num_kv_split),
+        device=q.device, dtype=torch.float32
+    )
+    l = torch.empty(
+        (batch_size, n_heads, num_kv_split),
+        device=q.device, dtype=torch.float32
+    )
+    a = torch.empty(
+        (batch_size, n_heads, num_kv_split, d_heads),
+        device=q.device, dtype=torch.float32
+    )
+    o = torch.empty_like(q)
+
+    t_part = triton.cdiv(kv_seq_len, num_kv_split)
+    num_blocks = triton.cdiv(t_part, BLOCK_T)
+
+    # PASS 1
+    grid1 = (batch_size * n_heads, num_kv_split)
+    flash_decoding_2_pass1[grid1](
+        q, k, v,
+        m, l, a,
         q.stride(0), q.stride(1), q.stride(2), q.stride(3),
         k.stride(0), k.stride(1), k.stride(2), k.stride(3),
         v.stride(0), v.stride(1), v.stride(2), v.stride(3),
-        mfix.stride(0), mfix.stride(1), mfix.stride(2),
-        M.stride(0), M.stride(1), M.stride(2),
-        L.stride(0), L.stride(1), L.stride(2),
-        A.stride(0), A.stride(1), A.stride(2), A.stride(3),
-        B, H, T, D,
-        T_PART=T_PART, N_BLOCKS=N_BLOCKS,
-        BLOCK_T=block_t, BLOCK_D=block_d,
-        num_warps=num_warps, num_stages=num_stages
+        m.stride(0), m.stride(1), m.stride(2),
+        l.stride(0), l.stride(1), l.stride(2),
+        a.stride(0), a.stride(1), a.stride(2), a.stride(3),
+        batch_size, n_heads, kv_seq_len, d_heads,
+        fix_max,
+        T_PART=t_part,
+        N_BLOCKS=num_blocks,
+        BLOCK_T=BLOCK_T, BLOCK_D=BLOCK_D,
+        num_warps=NUM_WARPS, num_stages=NUM_STAGES
     )
 
-    # PASS2는 동일 (M= mfix, L/A는 합산 결과)
-    grid2 = (B*H,)
+    # PASS 2
+    grid2 = (batch_size * n_heads,)
     flash_decoding_pass2[grid2](
-        M, L, A, O,
-        M.stride(0), M.stride(1), M.stride(2),
-        L.stride(0), L.stride(1), L.stride(2),
-        A.stride(0), A.stride(1), A.stride(2), A.stride(3),
-        O.stride(0), O.stride(1), O.stride(2), O.stride(3),
-        B, H, P, D,
-        BLOCK_D=block_d,
-        num_warps=num_warps, num_stages=num_stages
+        m, l, a,
+        o,
+        m.stride(0), m.stride(1), m.stride(2),
+        l.stride(0), l.stride(1), l.stride(2),
+        a.stride(0), a.stride(1), a.stride(2), a.stride(3),
+        o.stride(0), o.stride(1), o.stride(2), o.stride(3),
+        batch_size, n_heads, num_kv_split, d_heads,
+        BLOCK_D=BLOCK_D,
+        num_warps=NUM_WARPS, num_stages=NUM_STAGES
     )
-    return O
+    return o
 
 
 def estimate_memory(batch_size: int, n_heads: int, kv_seq_len: int, d_head: int, dtype: torch.dtype):
