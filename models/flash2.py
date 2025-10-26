@@ -12,14 +12,44 @@ NUM_KV_SPLIT = 8
 NUM_WARPS = 8
 NUM_STAGES = 3
 
+FLASH_ATTN_CONFIGS = [
+    triton.Config({'BLOCK_T': 64,  'BLOCK_D': 128}, num_warps=4, num_stages=2),
+    triton.Config({'BLOCK_T': 64,  'BLOCK_D': 128}, num_warps=8, num_stages=2),
+    triton.Config({'BLOCK_T': 64,  'BLOCK_D': 128}, num_warps=4, num_stages=3),
+    triton.Config({'BLOCK_T': 64,  'BLOCK_D': 128}, num_warps=8, num_stages=3),
+    triton.Config({'BLOCK_T': 128, 'BLOCK_D': 128}, num_warps=4, num_stages=2),
+    triton.Config({'BLOCK_T': 128, 'BLOCK_D': 128}, num_warps=8, num_stages=2),
+    triton.Config({'BLOCK_T': 128, 'BLOCK_D': 128}, num_warps=4, num_stages=3),
+    triton.Config({'BLOCK_T': 128, 'BLOCK_D': 128}, num_warps=8, num_stages=3),
+    triton.Config({'BLOCK_T': 256, 'BLOCK_D': 128}, num_warps=4, num_stages=2),
+    triton.Config({'BLOCK_T': 256, 'BLOCK_D': 128}, num_warps=8, num_stages=2),
+    triton.Config({'BLOCK_T': 256, 'BLOCK_D': 128}, num_warps=4, num_stages=3),
+    triton.Config({'BLOCK_T': 256, 'BLOCK_D': 128}, num_warps=8, num_stages=3),
+]
+FLASH_DECODING_PASS1_CONFIGS = [
+    triton.Config({'BLOCK_T': 64,  'BLOCK_D': 128}, num_warps=4, num_stages=2),
+    triton.Config({'BLOCK_T': 64,  'BLOCK_D': 128}, num_warps=8, num_stages=2),
+    triton.Config({'BLOCK_T': 64,  'BLOCK_D': 128}, num_warps=4, num_stages=3),
+    triton.Config({'BLOCK_T': 64,  'BLOCK_D': 128}, num_warps=8, num_stages=3),
+    triton.Config({'BLOCK_T': 128, 'BLOCK_D': 128}, num_warps=4, num_stages=2),
+    triton.Config({'BLOCK_T': 128, 'BLOCK_D': 128}, num_warps=8, num_stages=2),
+    triton.Config({'BLOCK_T': 128, 'BLOCK_D': 128}, num_warps=4, num_stages=3),
+    triton.Config({'BLOCK_T': 128, 'BLOCK_D': 128}, num_warps=8, num_stages=3),
+    triton.Config({'BLOCK_T': 256, 'BLOCK_D': 128}, num_warps=4, num_stages=2),
+    triton.Config({'BLOCK_T': 256, 'BLOCK_D': 128}, num_warps=8, num_stages=2),
+    triton.Config({'BLOCK_T': 256, 'BLOCK_D': 128}, num_warps=4, num_stages=3),
+    triton.Config({'BLOCK_T': 256, 'BLOCK_D': 128}, num_warps=8, num_stages=3),
+]
+FLASH_DECODING_PASS2_CONFIGS = [
+    triton.Config({'BLOCK_D': 128}, num_warps=4, num_stages=2),
+    triton.Config({'BLOCK_D': 128}, num_warps=8, num_stages=2),
+    triton.Config({'BLOCK_D': 128}, num_warps=4, num_stages=3),
+    triton.Config({'BLOCK_D': 128}, num_warps=8, num_stages=3),
+]
 
-def naive_attention(q, k, v):
-    scale = 1.0 / math.sqrt(q.size(-1))
-    attn_scores = torch.matmul(q, k.transpose(-2, -1)) * scale
-    attn_prob = torch.softmax(attn_scores, dim=-1)
-    attn_out = torch.matmul(attn_prob, v)
-    return attn_out
 
+# FLASH ATTENTION 2
+@triton.autotune(configs=FLASH_ATTN_CONFIGS, key=['T','D'])
 @triton.jit
 def flash_attn_2_kernel(
     Q,     # [B, H, 1, D] (bf16)
@@ -137,12 +167,14 @@ def flash_attn_2(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Ten
         o.stride(0), o.stride(1), o.stride(2), o.stride(3),
         batch_size, n_heads, kv_seq_len, d_heads,
         N_BLOCKS=num_blocks,
-        BLOCK_T=BLOCK_T, BLOCK_D=BLOCK_D,
-        num_warps=NUM_WARPS, num_stages=NUM_STAGES
+        #BLOCK_T=BLOCK_T, BLOCK_D=BLOCK_D,
+        #num_warps=NUM_WARPS, num_stages=NUM_STAGES
     )
     return o
 
 
+# FLASH ATTENTION 2 (FIX-MAX)
+@triton.autotune(configs=FLASH_ATTN_CONFIGS, key=['T','D'])
 @triton.jit
 def flash_attn_2_fixmax_kernel(
     Q,      # [B, H, 1, D] (bf16)
@@ -259,12 +291,14 @@ def flash_attn_2_fixmax(
         batch_size, n_heads, kv_seq_len, d_heads,
         fixmax,
         N_BLOCKS=num_blocks,
-        BLOCK_T=BLOCK_T, BLOCK_D=BLOCK_D,
-        num_warps=NUM_WARPS, num_stages=NUM_STAGES
+        #BLOCK_T=BLOCK_T, BLOCK_D=BLOCK_D,
+        #num_warps=NUM_WARPS, num_stages=NUM_STAGES
     )
     return o
 
 
+# FLASH DECODING
+@triton.autotune(configs=FLASH_DECODING_PASS1_CONFIGS, key=['T','D'])
 @triton.jit
 def flash_decoding_pass1(
     Q,     # [B, H, 1, D] (bf16)
@@ -359,7 +393,7 @@ def flash_decoding_pass1(
     tl.store(l_ptr, tl.where(is_empty, 0.0,     sum_exp))
     tl.store(a_ptr, tl.where(offs_d < D, tl.where(is_empty, 0.0, acc), 0.0))
 
-
+@triton.autotune(configs=FLASH_DECODING_PASS1_CONFIGS, key=['T','D'])
 @triton.jit
 def flash_decoding_2_pass1(
     Q,      # [B, H, 1, D] (bf16)
@@ -446,6 +480,7 @@ def flash_decoding_2_pass1(
     tl.store(l_ptr, tl.where(is_empty, 0.0, sum_exp))  # l = sum exp(score - mfix)
     tl.store(a_ptr, tl.where(offs_d < D, tl.where(is_empty, 0.0, acc), 0.0))
 
+@triton.autotune(configs=FLASH_DECODING_PASS2_CONFIGS, key=['D'])
 @triton.jit
 def flash_decoding_pass2(
     M, L, A,  # partials
@@ -556,8 +591,8 @@ def flash_decoding(
         batch_size, n_heads, kv_seq_len, d_heads,
         T_PART=t_part,
         N_BLOCKS=num_blocks,
-        BLOCK_T=BLOCK_T, BLOCK_D=BLOCK_D,
-        num_warps=NUM_WARPS, num_stages=NUM_STAGES
+        #BLOCK_T=BLOCK_T, BLOCK_D=BLOCK_D,
+        #num_warps=NUM_WARPS, num_stages=NUM_STAGES
     )
 
     # PASS 2
@@ -570,8 +605,8 @@ def flash_decoding(
         a.stride(0), a.stride(1), a.stride(2), a.stride(3),
         o.stride(0), o.stride(1), o.stride(2), o.stride(3),
         batch_size, n_heads, num_kv_split, d_heads,
-        BLOCK_D=BLOCK_D,
-        num_warps=NUM_WARPS, num_stages=NUM_STAGES
+        #BLOCK_D=BLOCK_D,
+        #num_warps=NUM_WARPS, num_stages=NUM_STAGES
     )
     return o
 
@@ -634,8 +669,8 @@ def flash_decoding_2(
         fix_max,
         T_PART=t_part,
         N_BLOCKS=num_blocks,
-        BLOCK_T=BLOCK_T, BLOCK_D=BLOCK_D,
-        num_warps=NUM_WARPS, num_stages=NUM_STAGES
+        #BLOCK_T=BLOCK_T, BLOCK_D=BLOCK_D,
+        #num_warps=NUM_WARPS, num_stages=NUM_STAGES
     )
 
     # PASS 2
@@ -648,10 +683,18 @@ def flash_decoding_2(
         a.stride(0), a.stride(1), a.stride(2), a.stride(3),
         o.stride(0), o.stride(1), o.stride(2), o.stride(3),
         batch_size, n_heads, num_kv_split, d_heads,
-        BLOCK_D=BLOCK_D,
-        num_warps=NUM_WARPS, num_stages=NUM_STAGES
+        #BLOCK_D=BLOCK_D,
+        #num_warps=NUM_WARPS, num_stages=NUM_STAGES
     )
     return o
+
+
+def naive_attention(q, k, v):
+    scale = 1.0 / math.sqrt(q.size(-1))
+    attn_scores = torch.matmul(q, k.transpose(-2, -1)) * scale
+    attn_prob = torch.softmax(attn_scores, dim=-1)
+    attn_out = torch.matmul(attn_prob, v)
+    return attn_out
 
 
 def estimate_memory(batch_size: int, n_heads: int, kv_seq_len: int, d_head: int, dtype: torch.dtype):
