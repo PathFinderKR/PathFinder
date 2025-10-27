@@ -2,6 +2,7 @@ from dataclasses import dataclass, field
 from typing import Literal, Optional
 from datetime import datetime
 import torch
+from transformers import PretrainedConfig
 
 #####
 # 1. Attention Weight Decay
@@ -10,7 +11,7 @@ import torch
 @dataclass
 class TrainConfig:
     debug: bool = False
-    wandb_project: str = "Flash Decoding"
+    wandb_project: str = "Test"
     model_name: str = "GPT2-small"
     run_name: str = field(default_factory=lambda: datetime.now().strftime('%Y-%m-%d_%H-%M-%S'))
 
@@ -35,7 +36,8 @@ class TrainConfig:
 
 
 @dataclass
-class ModelConfig:
+class ModelConfig(PretrainedConfig):
+    model_type = "GPT-2"
     vocab_size: int = 50304  # 50000 BPE merges + 256 bytes + 1 <|endoftext|> = 50257 -> 50304 for GPU efficiency
     max_seq_len: int = 1024
     d_embed: int = 768
@@ -50,7 +52,6 @@ class ModelConfig:
     attn_bias: bool = False
     n_kv_heads: Optional[int] = None
     rank: Optional[int] = None
-    cla: bool = False
 
     # FeedForward
     d_ff: int = 3072
@@ -132,28 +133,6 @@ mla_config = ModelConfig(
     attn_bias=False,
     mlp_bias=True
 )  # 111.17M
-cla_config = ModelConfig(
-    d_embed=768,
-    n_layers=12,
-    n_heads=12,
-    d_head=64,
-    d_ff=3072,
-    cla=True,
-    attn_bias=False,
-    mlp_bias=True
-)  # 123.84M
-hllkv_config = ModelConfig(
-    d_embed=768,
-    n_layers=12,
-    n_heads=12,
-    d_head=64,
-    attn_type="MLA",
-    rank=32,
-    cla=True,
-    d_ff=3072,
-    attn_bias=False,
-    mlp_bias=True
-)  # 123.84M
 
 model_config = gpt2_small_config
 

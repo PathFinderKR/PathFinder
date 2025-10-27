@@ -314,38 +314,34 @@ def main():
         device=device,
         master_process=master_process
     )
-    trainer.train()
+    #trainer.train()
+    #wandb.finish()
 
     # Save
     if master_process:
         # Save model locally
         output_dir = os.path.join(PROJECT_ROOT, "checkpoints", train_config.model_name, train_config.run_name)
         os.makedirs(output_dir, exist_ok=True)
-        if ddp:
-            model.module.save_pretrained(
-                output_dir,
-                safe_serialization=True
-            )
-        else:
-            model.save_pretrained(
-                output_dir,
-                safe_serialization=True
-            )
+        model.save_pretrained(
+            output_dir,
+            safe_serialization=True
+        )
+        tokenizer.save_pretrained(output_dir)
         print(f"Model saved to: {output_dir}")
 
         # Push to Hugging Face Hub
-        if ddp:
-            model.module.push_to_hub(
-                repo_id=f"PathFinderKR/{train_config.model_name}-{train_config.run_name}",
-                private=True,
-                use_auth_token=os.environ.get("HUGGINGFACE_TOKEN")
-            )
-        else:
-            model.push_to_hub(
-                repo_id=f"PathFinderKR/{train_config.model_name}-{train_config.run_name}",
-                private=True,
-                use_auth_token=os.environ.get("HUGGINGFACE_TOKEN")
-            )
+        repo_id = f"PathFinderKR/{train_config.model_name}-{train_config.run_name}"
+        hf_token = os.environ.get("HUGGINGFACE_TOKEN")
+        model.push_to_hub(
+            repo_id=repo_id,
+            private=True,
+            token=hf_token
+        )
+        AutoTokenizer.from_pretrained(output_dir).push_to_hub(
+            repo_id=repo_id,
+            private=True,
+            token=hf_token
+        )
         print(f"Model pushed to Hugging Face Hub: PathFinderKR/{train_config.model_name}-{train_config.run_name}")
 
     if ddp:

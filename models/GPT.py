@@ -15,11 +15,7 @@ class MultiHeadAttention(nn.Module):
         self.config = config
         self.layer_idx = layer_idx
         if config.attn_type == "MHA": # Multi Head Attention
-            if config.cla:
-                self.q_proj = nn.Linear(config.d_embed, config.d_embed, bias=config.attn_bias)
-                self.kv_proj = nn.Linear(config.d_embed, 2 * config.d_embed, bias=config.attn_bias)
-            else:
-                self.qkv_proj = nn.Linear(config.d_embed, 3 * config.d_embed, bias=config.attn_bias)
+            self.qkv_proj = nn.Linear(config.d_embed, 3 * config.d_embed, bias=config.attn_bias)
         elif config.attn_type == "GQA": # Grouped Query Attention
             pass
         elif config.attn_type == "MLA": # Multi Head Latent Attention
@@ -28,6 +24,8 @@ class MultiHeadAttention(nn.Module):
             self.Wkv_down = nn.Linear(config.d_embed, config.rank, bias=False)
             self.Wk_up = nn.Linear(config.rank, config.d_embed, bias=False)
             self.Wv_up = nn.Linear(config.rank, config.d_embed, bias=False)
+        elif config.attn_type == "CLA": # Cross Layer Attention
+            pass
         else:
             pass
         self.scale = 1 / math.sqrt(config.d_head)
@@ -53,11 +51,7 @@ class MultiHeadAttention(nn.Module):
         ########## Multi Head Attention ################################################################################
         if self.config.attn_type == "MHA":
             # ---------- Linear projection -----------------------------------------------------------------------------
-            if self.config.cla:
-                q = self.q_proj(x)                                                      # [batch_size, seq_len, d_embed]
-                k, v = self.kv_proj(x).split(self.config.d_embed, dim=2)                # [batch_size, seq_len, d_embed]
-            else:
-                q, k, v = self.qkv_proj(x).split(self.config.d_embed, dim=2)            # [batch_size, seq_len, d_embed]
+            q, k, v = self.qkv_proj(x).split(self.config.d_embed, dim=2)                # [batch_size, seq_len, d_embed]
 
             # ---------- Rotary positional embeddings ------------------------------------------------------------------
             # TODO
@@ -65,8 +59,8 @@ class MultiHeadAttention(nn.Module):
             # ---------- KV cache  -------------------------------------------------------------------------------------
             if kv_cache is not None:
                 k_cache, v_cache = kv_cache                                         # kv_cache[0] -> k, kv_cache[1] -> v
-                k = torch.cat([k_cache, k], dim=1)                                # [batch_size, seq_len, d_embed]
-                v = torch.cat([v_cache, v], dim=1)                                # [batch_size, seq_len, d_embed]
+                k = torch.cat([k_cache, k], dim=1)                               # [batch_size, seq_len, d_embed]
+                v = torch.cat([v_cache, v], dim=1)                               # [batch_size, seq_len, d_embed]
             new_kv_cache = (k, v) if not self.training else None  # Only store cache if generation
             kv_seq_len = k.size(1)
 
@@ -81,7 +75,7 @@ class MultiHeadAttention(nn.Module):
                         q, k, v,
                         scale=self.scale,
                         dropout_p=self.config.dropout if self.training else 0,
-                        is_causal=True
+                        is_causal=True if seq_len > 1 else False
                     )                                                           # [batch_size, n_heads, seq_len, d_head]
                 else:                  # -----Decode
                     if self.config.flash_decode:
@@ -95,7 +89,7 @@ class MultiHeadAttention(nn.Module):
                             q,
                             k, v,
                             scale=self.scale,
-                            is_causal=True
+                            is_causal=False
                         )
             else:
                 attn_scores = (q @ k.transpose(-2, -1)) * self.scale           # [batch_size, n_heads, seq_len, seq_len]
@@ -127,15 +121,7 @@ class MultiHeadAttention(nn.Module):
             if self.training:
                 # ---------- Linear projection -------------------------------------------------------------------------
                 q = self.Wq(x)                                                          # [batch_size, seq_len, d_embed]
-                if self.config.cla:
-                    if self.layer_idx == 0:
-                        kv_latent = self.Wkv_down(x)                                       # [batch_size, seq_len, rank]
-                    else:
-                        kv_latent = kv_cache
-                        new_kv_cache = kv_latent
-                else:
-                    kv_latent = self.Wkv_down(x)                                           # [batch_size, seq_len, rank]
-                    new_kv_cache = None
+                kv_latent = self.Wkv_down(x)                                               # [batch_size, seq_len, rank]
                 k = self.Wk_up(kv_latent)                                               # [batch_size, seq_len, d_embed]
                 v = self.Wv_up(kv_latent)                                               # [batch_size, seq_len, d_embed]
 
@@ -175,18 +161,6 @@ class MultiHeadAttention(nn.Module):
                                                                                 # [batch_size, n_heads, seq_len, d_head]
                 Wk_up = self.Wk_up.weight.view(self.config.n_heads, self.config.d_head, self.config.rank)
                 q_latent = q @ Wk_up                                              # [batch_size, n_heads, seq_len, rank]
-                if self.config.cla:
-                    if self.layer_idx == 0:
-                        new_kv_latent = self.Wkv_down(x)
-                        if kv_cache is not None:
-                            kv_latent = torch.cat([kv_cache, new_kv_latent], dim=1) # [batch_size, seq_len, rank]
-                        else:
-                            kv_latent = new_kv_latent
-                        new_kv_cache = kv_latent
-                else:
-                    kv_latent = kv_cache
-                    new_kv_cache = None
-
                 kv_latent = self.Wkv_down(x)                                               # [batch_size, seq_len, rank]
 
                 # ---------- KV cache  ---------------------------------------------------------------------------------
@@ -332,10 +306,7 @@ class GPT(nn.Module, PyTorchModelHubMixin):
 
     def forward(self, input_ids, target_ids=None, kv_cache=None):
         if kv_cache is None:  # -----Prefill
-            if self.config.cla:
-                kv_cache = None
-            else:
-                kv_cache = [None] * self.config.n_layers
+            kv_cache = [None] * self.config.n_layers
             start_idx = 0
 
         else:                 # -----Decode
@@ -380,18 +351,9 @@ class GPT(nn.Module, PyTorchModelHubMixin):
 
         # ---------- Blocks --------------------------------------------------------------------------------------------
         new_kv_cache = []
-        if self.config.cla:
-            shared_cache = None if kv_cache is None else kv_cache[0]
-            for layer_idx, block in enumerate(self.blocks):
-                if layer_idx == 0:
-                    x, shared_cache = block(x, kv_cache=shared_cache)
-                    new_kv_cache.append(shared_cache)
-                else:
-                    x, _ = block(x, kv_cache=shared_cache)
-        else:
-            for layer_idx, block in enumerate(self.blocks):
-                x, kv_cache_layer = block(x, kv_cache=kv_cache[layer_idx])              # [batch_size, seq_len, d_embed]
-                new_kv_cache.append(kv_cache_layer)
+        for layer_idx, block in enumerate(self.blocks):
+            x, kv_cache_layer = block(x, kv_cache=kv_cache[layer_idx])                  # [batch_size, seq_len, d_embed]
+            new_kv_cache.append(kv_cache_layer)
 
         # ---------- Final linear layer --------------------------------------------------------------------------------
         x = self.norm(x)
@@ -484,7 +446,6 @@ def test_model_profiling():
         n_heads=12,
         d_head=64,
         rank=16,
-        cla=True,
         d_ff=3072,
         attn_bias=False,
         mlp_bias=True

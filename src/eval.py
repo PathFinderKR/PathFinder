@@ -1,6 +1,6 @@
 """
 lm_eval --model hf \
-    --model_args pretrained=/home/pathfinder/models/PathFinderKR/GPT2-small-2025-10-25_10-12-10,trust_remote_code=True,tokenizer=gpt2 \
+    --model_args pretrained=PathFinderKR/GPT2-small-2025-10-27_13-07-40,trust_remote_code=True \
     --tasks arc_easy,lambada_openai,hellaswag,winogrande \
     --num_fewshot 5 \
     --device cuda:0 \
