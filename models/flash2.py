@@ -6,45 +6,17 @@ import triton.language as tl
 from triton.runtime import driver
 from src.utils import set_seed
 
-FLASH_ATTN_CONFIGS = [
-    triton.Config({'BLOCK_T': 256, 'BLOCK_D': 64},  num_warps=4, num_stages=2),
-    triton.Config({'BLOCK_T': 256, 'BLOCK_D': 64},  num_warps=8, num_stages=3),
-    triton.Config({'BLOCK_T': 256, 'BLOCK_D': 64},  num_warps=8, num_stages=4),
-    triton.Config({'BLOCK_T': 512, 'BLOCK_D': 64},  num_warps=4, num_stages=2),
-    triton.Config({'BLOCK_T': 512, 'BLOCK_D': 64},  num_warps=8, num_stages=3),
-    triton.Config({'BLOCK_T': 512, 'BLOCK_D': 64},  num_warps=8, num_stages=4),
-    triton.Config({'BLOCK_T': 1024, 'BLOCK_D': 64},  num_warps=4, num_stages=2),
-    triton.Config({'BLOCK_T': 1024, 'BLOCK_D': 64},  num_warps=8, num_stages=3),
-    triton.Config({'BLOCK_T': 1024, 'BLOCK_D': 64},  num_warps=8, num_stages=4),
-]
-FLASH_DECODING_PASS1_CONFIGS = [
-    triton.Config({'BLOCK_T': 256, 'BLOCK_D': 64},  num_warps=4, num_stages=2),
-    triton.Config({'BLOCK_T': 256, 'BLOCK_D': 64},  num_warps=8, num_stages=3),
-    triton.Config({'BLOCK_T': 256, 'BLOCK_D': 64},  num_warps=8, num_stages=4),
-    triton.Config({'BLOCK_T': 512, 'BLOCK_D': 64},  num_warps=4, num_stages=2),
-    triton.Config({'BLOCK_T': 512, 'BLOCK_D': 64},  num_warps=8, num_stages=3),
-    triton.Config({'BLOCK_T': 512, 'BLOCK_D': 64},  num_warps=8, num_stages=4),
-    triton.Config({'BLOCK_T': 1024, 'BLOCK_D': 64},  num_warps=4, num_stages=2),
-    triton.Config({'BLOCK_T': 1024, 'BLOCK_D': 64},  num_warps=8, num_stages=3),
-    triton.Config({'BLOCK_T': 1024, 'BLOCK_D': 64},  num_warps=8, num_stages=4),
-]
-FLASH_DECODING_PASS2_CONFIGS = [
-    triton.Config({'BLOCK_D': 64, 'BLOCK_P': 8},  num_warps=4, num_stages=2),
-    triton.Config({'BLOCK_D': 64, 'BLOCK_P': 8},  num_warps=8, num_stages=3),
-    triton.Config({'BLOCK_D': 64, 'BLOCK_P': 8},  num_warps=8, num_stages=4),
-    triton.Config({'BLOCK_D': 64, 'BLOCK_P': 16}, num_warps=4, num_stages=2),
-    triton.Config({'BLOCK_D': 64, 'BLOCK_P': 16}, num_warps=8, num_stages=3),
-    triton.Config({'BLOCK_D': 64, 'BLOCK_P': 16},  num_warps=8, num_stages=4),
-]
+BLOCK_T = 256
+BLOCK_D = 64
+NUM_WARPS = 4
+NUM_STAGES = 2
 
 
-# FLASH ATTENTION 2
-@triton.autotune(configs=FLASH_ATTN_CONFIGS, key=['T', 'D'])
 @triton.jit
 def flash_attn_2_kernel(
-    Q,     # [B, H, 1, D] (bf16)
-    K, V,  # [B, H, T, D] (bf16)
-    O,     # [B, H, 1, D] (bf16)
+    Q,     # [B, H, 1, D] (bf16/fp16)
+    K, V,  # [B, H, T, D] (bf16/fp16)
+    O,     # [B, H, 1, D] (bf16/fp16)
     stride_q_b, stride_q_h, stride_q_t, stride_q_d,
     stride_k_b, stride_k_h, stride_k_t, stride_k_d,
     stride_v_b, stride_v_h, stride_v_t, stride_v_d,
@@ -54,12 +26,13 @@ def flash_attn_2_kernel(
 ):
     # Program IDs
     off_hb = tl.program_id(0)
-    off_h  = off_hb % H
-    off_b  = off_hb // H
+    off_h = off_hb % H
+    off_b = off_hb // H
 
     # Offsets
     offs_t = tl.arange(0, BLOCK_T)
     offs_d = tl.arange(0, BLOCK_D)
+    mask_d = offs_d < D
 
     # Pointers
     q_ptrs = Q + off_b * stride_q_b + off_h * stride_q_h + 0 * stride_q_t + offs_d * stride_q_d
@@ -68,77 +41,83 @@ def flash_attn_2_kernel(
     o_ptrs = O + off_b * stride_o_b + off_h * stride_o_h + 0 * stride_o_t + offs_d * stride_o_d
 
     # Load query vector
-    q = tl.load(q_ptrs, mask=offs_d < D, other=0.0)
-    q = tl.reshape(q, (BLOCK_D, 1))
+    q = tl.load(q_ptrs, mask=offs_d < D, other=0.0)  # [BLOCK_D] (bf16)
+    q = tl.reshape(q, (BLOCK_D, 1))           # [BLOCK_D, 1]
 
     # Constants
-    Df      = tl.full((), 0.0, dtype=tl.float32) + D
-    scale   = 1.0 / tl.sqrt(Df)
+    d_f32 = tl.full((), D, dtype=tl.float32)
+    scale = 1.0 / tl.sqrt(d_f32)
     neg_inf = tl.full((), -float("inf"), dtype=tl.float32)
+    eps = tl.full((), 1e-20, dtype=tl.float32)
 
-    # online softmax stats (fp32)
+    # Online-softmax stats
     max_score = neg_inf
-    sum_exp   = tl.zeros((), dtype=tl.float32)
-    acc       = tl.zeros([BLOCK_D], dtype=tl.float32)
+    sum_exp = tl.zeros((), dtype=tl.float32)
+    acc = tl.zeros([BLOCK_D], dtype=tl.float32)
 
     # Loop over K, V blocks along T
-    for b in range(0, tl.cdiv(T, BLOCK_T)):
+    n_blocks = tl.cdiv(T, BLOCK_T)
+    for b in range(0, n_blocks):
         start_n = b * BLOCK_T
-        t_idx = start_n + offs_t  # [BLOCK_T]
-        mask_t = t_idx < T        # [BLOCK_T]
-        mask_d = offs_d < D       # [BLOCK_D]
-
-        # Pointers
-        k_ptrs = k_base + t_idx[:, None] * stride_k_t + offs_d[None, :] * stride_k_d
-        v_ptrs = v_base + t_idx[:, None] * stride_v_t + offs_d[None, :] * stride_v_d
+        t_idx   = start_n + offs_t
+        mask_t  = t_idx < T
 
         # Load K, V blocks (bf16)
+        k_ptrs = k_base + t_idx[:, None] * stride_k_t + offs_d[None, :] * stride_k_d
+        v_ptrs = v_base + t_idx[:, None] * stride_v_t + offs_d[None, :] * stride_v_d
         kv_mask = mask_t[:, None] & mask_d[None, :]
-        k = tl.load(k_ptrs, mask=kv_mask, other=0.0)
-        v = tl.load(v_ptrs, mask=kv_mask, other=0.0)
+        k = tl.load(k_ptrs, mask=kv_mask, other=0.0)  # [BLOCK_T, BLOCK_D] bf16
+        v = tl.load(v_ptrs, mask=kv_mask, other=0.0)  # [BLOCK_T, BLOCK_D] bf16
 
         # Compute attention scores: q @ K^T
-        scores = tl.dot(k, q, out_dtype=tl.float32) * scale
+        scores = tl.dot(k, q, out_dtype=tl.float32) * scale  # [BLOCK_T, 1]
         scores = tl.where(mask_t, scores, neg_inf)
 
-        # Online-softmax update (fp32)
+        # Online-softmax update
         block_max = tl.max(scores, axis=0)
-        new_max   = tl.maximum(max_score, block_max)
-        rescale   = tl.where(max_score == neg_inf, 0.0, tl.exp(max_score - new_max))
-        acc       *= rescale
-        sum_exp   *= rescale
+        new_max = tl.maximum(max_score, block_max)
+        rescale = tl.where(max_score == neg_inf, 0.0, tl.exp(max_score - new_max))
+        acc *= rescale
+        sum_exp *= rescale
 
-        # Probabilities
-        probs = tl.exp(scores - new_max)
+        # current block contributions
+        # probs are fp32 for accuracy; mask OOB to 0
+        probs = tl.exp(scores - new_max)  # [BLOCK_T], fp32
         probs = tl.where(mask_t, probs, 0.0)
+        probs = probs.to(tl.bfloat16)
 
-        # Update accumulator and sum
-        acc       += tl.sum(probs[:, None] * v, axis=0)  # [BLOCK_D]
-        sum_exp   += tl.sum(probs, axis=0)
+        # acc += probs^T @ v
+        # Make probs 2D row: [1, BLOCK_T] and do matmul with [BLOCK_T, BLOCK_D]
+        acc += tl.dot(probs[None, :], v, out_dtype=tl.float32)[0, :]        # [BLOCK_D]
+        sum_exp += tl.sum(probs, axis=0)                                    # scalar
         max_score = new_max
 
     # Final normalization
-    out = acc / tl.maximum(sum_exp, 1e-20)
+    denom = tl.maximum(sum_exp, eps)
+    out = acc / denom  # [BLOCK_D] (fp32)
+    out = out.to(O.dtype.element_ty)
 
     # Store output
-    tl.store(o_ptrs, out.to(O.dtype.element_ty), mask=offs_d < D)
+    tl.store(o_ptrs, out, mask=offs_d < D)
+
 
 def flash_attn_2(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
     """
     Flash Attention 2 Triton Kernel
 
     Args:
-        q: Query tensor [batch, n_heads, 1, d_head]
-        k: Key tensor   [batch, n_heads, seq_len_k, d_head]
-        v: Value tensor [batch, n_heads, seq_len_v, d_head]
-
+        q: [batch, n_heads, 1, d_head]
+        k: [batch, n_heads, seq_len_k, d_head]
+        v: [batch, n_heads, seq_len_v, d_head]
     Returns:
-        o: Output tensor [batch, n_heads, 1, d_head]
+        o: [batch, n_heads, 1, d_head]
     """
-    _, _, q_len, _ = q.shape
-    batch_size, n_heads, kv_seq_len, d_heads = k.shape
     assert q.ndim == k.ndim == v.ndim == 4
-    assert q_len == 1
+    B, H, Tq, D = q.shape
+    assert Tq == 1
+    Bk, Hk, Tk, Dk = k.shape
+    Bv, Hv, Tv, Dv = v.shape
+    assert (Bk, Hk, Dk) == (B, H, D) and (Bv, Hv, Dv) == (B, H, D) and Tk == Tv
 
     q = q.contiguous()
     k = k.contiguous()
@@ -146,22 +125,22 @@ def flash_attn_2(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> torch.Ten
 
     o = torch.empty_like(q)
 
-    grid = (batch_size * n_heads, )
+    grid = (B * H,)
     flash_attn_2_kernel[grid](
         q, k, v, o,
         q.stride(0), q.stride(1), q.stride(2), q.stride(3),
         k.stride(0), k.stride(1), k.stride(2), k.stride(3),
         v.stride(0), v.stride(1), v.stride(2), v.stride(3),
         o.stride(0), o.stride(1), o.stride(2), o.stride(3),
-        batch_size, n_heads, kv_seq_len, d_heads,
-        #BLOCK_T=BLOCK_T, BLOCK_D=BLOCK_D,
-        #num_warps=NUM_WARPS, num_stages=NUM_STAGES
+        B, H, Tv, D,
+        BLOCK_T=BLOCK_T, BLOCK_D=BLOCK_D,
+        num_warps=NUM_WARPS, num_stages=NUM_STAGES
     )
     return o
 
 
+
 # FLASH ATTENTION 2 (FIX-MAX)
-@triton.autotune(configs=FLASH_ATTN_CONFIGS, key=['T', 'D'])
 @triton.jit
 def flash_attn_2_fixmax_kernel(
     Q,      # [B, H, 1, D] (bf16)
@@ -209,9 +188,9 @@ def flash_attn_2_fixmax_kernel(
     # Loop over K, V blocks along T
     for b in range(0, tl.cdiv(T, BLOCK_T)):
         start_n = b * BLOCK_T
-        t_idx = start_n + offs_t  # [BLOCK_T]
-        mask_t = t_idx < T        # [BLOCK_T]
-        mask_d = offs_d < D       # [BLOCK_D]
+        t_idx = start_n + offs_t
+        mask_t = t_idx < T
+        mask_d = offs_d < D
 
         # Pointers
         k_ptrs = k_base + t_idx[:, None] * stride_k_t + offs_d[None, :] * stride_k_d
@@ -283,7 +262,6 @@ def flash_attn_2_fixmax(
 
 
 # FLASH DECODING
-@triton.autotune(configs=FLASH_DECODING_PASS1_CONFIGS, key=['T','D','P'])
 @triton.jit
 def flash_decoding_pass1(
     Q,     # [B, H, 1, D] (bf16)
@@ -378,7 +356,6 @@ def flash_decoding_pass1(
     tl.store(l_ptr, tl.where(is_empty, 0.0, sum_exp).to(tl.bfloat16))
     tl.store(a_ptr, tl.where(offs_d < D, tl.where(is_empty, 0.0, acc), 0.0).to(tl.bfloat16))
 
-@triton.autotune(configs=FLASH_DECODING_PASS1_CONFIGS, key=['T','D','P'])
 @triton.jit
 def flash_decoding_2_pass1(
     Q,      # [B, H, 1, D] (bf16)
@@ -466,7 +443,6 @@ def flash_decoding_2_pass1(
     tl.store(l_ptr, tl.where(is_empty, 0.0, sum_exp).to(tl.bfloat16))
     tl.store(a_ptr, tl.where(offs_d < D, tl.where(is_empty, 0.0, acc), 0.0).to(tl.bfloat16))
 
-@triton.autotune(configs=FLASH_DECODING_PASS2_CONFIGS, key=['D','P'])
 @triton.jit
 def flash_decoding_pass2(
     M, L, A,  # partials
@@ -847,8 +823,8 @@ def main():
         ("FA2", flash_attn_2),
         #("FA2 + fix-max", flash_attn_2_fixmax),
         # FLASH DECODING
-        ("Flash Decoding", flash_decoding),
-        ("Flash Decoding 2",flash_decoding_2),
+        #("Flash Decoding", flash_decoding),
+        #("Flash Decoding 2",flash_decoding_2),
     ]
     benchmark(
         configs=test_configs, algorithms=algorithms,
